@@ -101,6 +101,7 @@ impl Deepgram {
             tokio::pin!(deadline);
 
             let mut audio_open = true;
+            let mut frames_sent = 0usize;
             loop {
                 tokio::select! {
                     biased;
@@ -117,8 +118,16 @@ impl Deepgram {
                                         return;
                                     }
                             }
-                            Ok(Message::Close(_)) => {
-                                let _ = event_tx.send(SttEvent::Closed(None)).await;
+                            Ok(Message::Close(frame)) => {
+                                // Surface the close code/reason: Deepgram uses it to
+                                // report bad query parameters and auth problems, and
+                                // without it a rejected connection is indistinguishable
+                                // from "the user said nothing".
+                                let detail = frame.map(|f| format!("code={} reason={}", f.code, f.reason));
+                                if let Some(d) = &detail {
+                                    tracing::warn!(close = %d, "deepgram closed the stream");
+                                }
+                                let _ = event_tx.send(SttEvent::Closed(detail)).await;
                                 return;
                             }
                             Ok(_) => {}
@@ -136,6 +145,7 @@ impl Deepgram {
                                 for s in samples {
                                     bytes.extend_from_slice(&s.to_le_bytes());
                                 }
+                                frames_sent += 1;
                                 if sink.send(Message::Binary(bytes.into())).await.is_err() {
                                     let _ = event_tx.send(SttEvent::Closed(Some("send failed".into()))).await;
                                     return;
@@ -143,6 +153,7 @@ impl Deepgram {
                             }
                             None => {
                                 // End of audio: ask Deepgram to finalize.
+                                tracing::debug!(frames_sent, "microphone stream ended; finalizing");
                                 audio_open = false;
                                 let _ = sink.send(Message::Text(
                                     r#"{"type":"CloseStream"}"#.to_string().into()

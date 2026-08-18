@@ -13,7 +13,7 @@ pub async fn run(gateway: Arc<Gateway>) {
     let mut lines = BufReader::new(stdin).lines();
     let mut stdout = tokio::io::stdout();
 
-    let _ = stdout.write_all(b"hermit ready. type a question, or /quit\n> ").await;
+    let _ = stdout.write_all(b"hermit ready. type a question, /listen to speak, or /quit\n> ").await;
     let _ = stdout.flush().await;
 
     loop {
@@ -34,6 +34,19 @@ pub async fn run(gateway: Arc<Gateway>) {
         }
         if matches!(input, "/quit" | "/exit") {
             break;
+        }
+        // Start a voice turn without the wake word. Useful when no Picovoice key is
+        // configured, and for testing the microphone path on demand.
+        if matches!(input, "/listen") {
+            let ok = gateway.trigger_listen();
+            let msg: &[u8] = if ok {
+                b"listening... speak now\n> "
+            } else {
+                b"voice pipeline is not running (no microphone, or built without ALSA)\n> "
+            };
+            let _ = stdout.write_all(msg).await;
+            let _ = stdout.flush().await;
+            continue;
         }
         // `/say` speaks the answer too; plain input is text-only so the bench
         // harness is not gated on audio hardware.

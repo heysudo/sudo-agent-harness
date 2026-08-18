@@ -164,13 +164,20 @@ impl AudioPlayer {
                             Ok(m) => m,
                             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                                 // Nothing to play: keep the device clocked.
-                                let started = std::time::Instant::now();
+                                //
+                                // Do NOT sleep here. A blocking ALSA write returns as
+                                // soon as the frames are ACCEPTED into the buffer, not
+                                // when they are played — so on an empty buffer it
+                                // returns instantly. Sleeping on that "fast" return
+                                // starves the buffer and produces a continuous stream
+                                // of EPIPE underruns (observed on hardware: one every
+                                // ~20 ms). Writing straight back fills the buffer until
+                                // ALSA blocks, which is the correct pacing. Backends
+                                // that never block (the null/test sinks) pace
+                                // themselves inside write().
                                 if let Err(e) = backend.write(&silence) {
                                     tracing::warn!(error = %e, "keepalive write failed");
                                     std::thread::sleep(silence_dur);
-                                } else if started.elapsed() < silence_dur / 2 {
-                                    // Backend returned early (didn't block); pace manually.
-                                    std::thread::sleep(silence_dur.saturating_sub(started.elapsed()));
                                 }
                                 continue;
                             }
@@ -318,6 +325,11 @@ mod tests {
     impl Backend for RecordingBackend {
         fn write(&mut self, samples: &[i16]) -> Result<()> {
             self.written.lock().unwrap().extend_from_slice(samples);
+            // Model a real device: consume at roughly realtime so the keepalive loop
+            // paces instead of spinning. 16 kHz assumed for test sizing.
+            std::thread::sleep(std::time::Duration::from_secs_f64(
+                samples.len() as f64 / 16_000.0,
+            ));
             Ok(())
         }
         fn discard(&mut self) -> Result<()> {

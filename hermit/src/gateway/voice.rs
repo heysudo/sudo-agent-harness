@@ -24,10 +24,24 @@ use std::time::Duration;
 pub type MicRx = tokio::sync::mpsc::Receiver<Vec<i16>>;
 pub type MicTx = tokio::sync::mpsc::Sender<Vec<i16>>;
 
+/// Manual "start listening now" trigger, equivalent to the wake word firing.
+///
+/// Exists because the wake word needs a Picovoice access key, which a device may not
+/// have; it also gives a physical button or GPIO somewhere to hook into later. The CLI
+/// exposes it as `/listen`.
+pub type TriggerRx = tokio::sync::mpsc::Receiver<()>;
+pub type TriggerTx = tokio::sync::mpsc::Sender<()>;
+
 /// Run the voice loop until shutdown.
 ///
 /// `mic_rx` yields mono PCM at `audio.sample_rate` from the capture thread.
-pub async fn run(gateway: Arc<Gateway>, mut mic_rx: MicRx, detector: Box<dyn WakeDetector>) {
+/// `trigger_rx` starts a turn without the wake word.
+pub async fn run(
+    gateway: Arc<Gateway>,
+    mut mic_rx: MicRx,
+    detector: Box<dyn WakeDetector>,
+    mut trigger_rx: TriggerRx,
+) {
     let cfg = gateway.config();
 
     let Some(deepgram) = Deepgram::from_config(&cfg.stt) else {
@@ -45,19 +59,43 @@ pub async fn run(gateway: Arc<Gateway>, mut mic_rx: MicRx, detector: Box<dyn Wak
 
     tracing::info!("voice pipeline ready; waiting for the wake word");
 
-    while let Some(samples) = mic_rx.recv().await {
-        // While a turn is being transcribed, audio is forwarded to STT by the
-        // utterance task rather than scanned for the wake word.
-        if listening.load(Ordering::Acquire) {
+    loop {
+        // Either the wake word fires, or something triggers a turn manually.
+        let start_turn = tokio::select! {
+            frame = mic_rx.recv() => match frame {
+                Some(samples) => {
+                    // While a turn is being transcribed, audio is forwarded to STT by
+                    // the utterance task rather than scanned for the wake word.
+                    if listening.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    let hit = feeder.push(&samples).is_some();
+                    if hit {
+                        feeder.reset();
+                        tracing::info!("wake word detected");
+                    }
+                    hit
+                }
+                None => break, // capture ended
+            },
+            trig = trigger_rx.recv() => match trig {
+                Some(()) => {
+                    if listening.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    tracing::info!("manual listen trigger");
+                    feeder.reset();
+                    true
+                }
+                // Sender dropped: no more manual triggers, but the wake word still works.
+                None => continue,
+            },
+        };
+        if !start_turn {
             continue;
         }
 
-        if feeder.push(&samples).is_none() {
-            continue;
-        }
-        feeder.reset();
-
-        // --- wake word fired -----------------------------------------------
+        // --- wake fired (or manual trigger) --------------------------------
         let wake_at = std::time::Instant::now();
 
         // Barge-in: kill anything currently being spoken, immediately.
@@ -67,13 +105,15 @@ pub async fn run(gateway: Arc<Gateway>, mut mic_rx: MicRx, detector: Box<dyn Wak
         listening.store(true, Ordering::Release);
         tracing::info!(
             flush_us = wake_at.elapsed().as_micros(),
-            "wake word detected; listening"
+            "listening"
         );
 
         let gw = gateway.clone();
         let dg = deepgram.clone();
         let flag = listening.clone();
-        let (utt_tx, utt_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(32);
+        // 128 x 20 ms = ~2.5 s of audio, comfortably covering the Deepgram
+        // handshake so early speech is not lost while the socket opens.
+        let (utt_tx, utt_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(128);
 
         // The utterance task owns STT and the turn; the capture loop keeps feeding
         // it audio until it signals completion.
@@ -102,9 +142,20 @@ async fn forward_until_done(
     while listening.load(Ordering::Acquire) {
         match tokio::time::timeout(Duration::from_millis(100), mic_rx.recv()).await {
             Ok(Some(samples)) => {
-                if utt_tx.try_send(samples).is_err() {
-                    // STT is finished or wedged; stop forwarding.
-                    break;
+                match utt_tx.try_send(samples) {
+                    Ok(()) => {}
+                    // The utterance channel is momentarily full — this happens
+                    // routinely during the ~1 s Deepgram handshake, when audio
+                    // arrives faster than the (not yet open) socket drains it.
+                    // Dropping this one 20 ms chunk is harmless; treating it as
+                    // "STT is finished" and hanging up is NOT. That mistake made
+                    // every utterance end after exactly 32 frames (the channel
+                    // depth) with a clean close code and an empty transcript.
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        tracing::trace!("utterance channel full; dropping a mic chunk");
+                    }
+                    // Receiver gone: STT genuinely finished. Stop forwarding.
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
             Ok(None) => break, // capture ended

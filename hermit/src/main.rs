@@ -258,8 +258,12 @@ async fn run(config_path: PathBuf) -> Result<()> {
         let detector = wake::build(&cfg.wake);
         match hermit::gateway::voice::spawn_capture(&cfg.audio) {
             Ok(mic_rx) => {
+                // Manual trigger so a turn can start without the wake word (CLI
+                // `/listen`); depth 1 because queuing trigger requests is meaningless.
+                let (trig_tx, trig_rx) = tokio::sync::mpsc::channel::<()>(1);
+                let _ = gateway.voice_trigger.set(trig_tx);
                 let gw = gateway.clone();
-                tokio::spawn(hermit::gateway::voice::run(gw, mic_rx, detector));
+                tokio::spawn(hermit::gateway::voice::run(gw, mic_rx, detector, trig_rx));
             }
             Err(e) => tracing::error!(error = %e, "microphone capture unavailable; voice disabled"),
         }

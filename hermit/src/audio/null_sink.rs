@@ -21,7 +21,6 @@ impl NullBackend {
     }
 
     /// Sleep in proportion to the audio written, approximating a real device.
-    /// Off by default so unit tests stay fast.
     pub fn realtime(mut self) -> Self {
         self.realtime = true;
         self
@@ -34,11 +33,12 @@ impl Backend for NullBackend {
         let now = Instant::now();
         let until = self.playhead.filter(|p| *p > now).unwrap_or(now) + dur;
         self.playhead = Some(until);
-        if self.realtime {
-            let ahead = until.saturating_duration_since(now);
-            // Bound the sleep so a huge buffer cannot wedge a test.
-            std::thread::sleep(ahead.min(Duration::from_millis(250)));
-        }
+        // Always pace, not just in `realtime` mode: the keepalive loop relies on the
+        // backend blocking for roughly the duration of the audio it accepted. A
+        // backend that returns instantly would turn that loop into a busy-spin.
+        // Bounded so a huge buffer cannot wedge a caller.
+        let ahead = until.saturating_duration_since(now);
+        std::thread::sleep(ahead.min(Duration::from_millis(250)));
         Ok(())
     }
 

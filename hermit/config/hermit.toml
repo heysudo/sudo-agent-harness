@@ -67,7 +67,7 @@ default_volume = 70
 provider = "cartesia"                 # "cartesia" | "elevenlabs" | "piper"
 cartesia_url = "wss://api.cartesia.ai/tts/websocket"
 cartesia_model = "sonic-3"
-cartesia_voice_id = ""                # REQUIRED: paste a voice id from Cartesia
+cartesia_voice_id = "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"   # Skylar (en-US, public)
 cartesia_version = "2026-08-14"
 # The provider default is 3000ms, which alone exceeds the 1.2s first-audio gate.
 # Validation refuses any value but 0.

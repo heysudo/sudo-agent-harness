@@ -42,6 +42,8 @@ pub struct Gateway {
     pub player: crate::audio::AudioPlayer,
     pub acks: Arc<AckBank>,
     pub reflect_tx: tokio::sync::mpsc::Sender<ReflectSignal>,
+    /// Starts a voice turn without the wake word (CLI `/listen`, or a future button).
+    pub voice_trigger: std::sync::OnceLock<voice::TriggerTx>,
     turn_seq: AtomicU64,
     /// One turn at a time. The device has one speaker and one user; overlapping
     /// turns would interleave speech and corrupt the conversation history.
@@ -73,8 +75,18 @@ impl Gateway {
             player,
             acks,
             reflect_tx,
+            voice_trigger: std::sync::OnceLock::new(),
             turn_seq: AtomicU64::new(0),
             turn_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// Ask the voice pipeline to start listening now. Returns false if voice is not
+    /// running (no microphone, or built without ALSA).
+    pub fn trigger_listen(&self) -> bool {
+        match self.voice_trigger.get() {
+            Some(tx) => tx.try_send(()).is_ok(),
+            None => false,
         }
     }
 

@@ -18,8 +18,8 @@ user-facing doc. This file is the engineering log.
 | 0 — hardware bring-up | **PASSED** (enumeration, rates, playback, capture, AEC) |
 | 1 — skeleton + streaming | **PASSED on device** (TTFT 366 ms p50, gate 700) |
 | 2 — tools | Code complete; verified against real gpt-oss-120b. Needs `PARALLEL_API_KEY` / `FIRECRAWL_API_KEY` for live gates |
-| 3 — voice out | Code complete; **blocked on `CARTESIA_API_KEY`** |
-| 4 — voice in | Code complete; **blocked on `DEEPGRAM_API_KEY` + `PICOVOICE_ACCESS_KEY`** |
+| 3 — voice out | **PASSED on device** — first audio 654 / 875 ms (gate 1200) |
+| 4 — voice in | **PASSED on device** via `/listen` — live speech transcribed, answered, spoken; first audio 983 ms. Wake word itself still needs `PICOVOICE_ACCESS_KEY` + `.ppn` |
 | 5 — music | Code complete; needs Spotify Premium creds; mpv/librespot sidecars not yet installed |
 | 6 — memory | **PASSED** — recall 0.7 ms, cross-session verified with real model |
 | 7 — learning loop | **PASSED** — facts extracted, stored, recalled in a fresh session |
@@ -175,6 +175,22 @@ argument from `notify()`). **Run the Pi build before claiming anything compiles.
 
 ---
 
+## Bugs found and fixed on hardware in the voice phases (do not reintroduce)
+
+1. **Keepalive underrun storm.** The first keepalive implementation slept when a
+   write returned "fast". A blocking ALSA write returns when frames are *accepted*,
+   not played, so on an empty buffer it returns instantly; sleeping on that starves
+   the buffer and produced an `EPIPE` every ~20 ms. Fix: never sleep — write straight
+   back and let ALSA block. Backends that don't block (null/test) pace themselves in
+   `write()`. Result: 0 underruns.
+2. **Utterances truncated after exactly 32 frames.** `forward_until_done` treated a
+   `TrySendError::Full` on the utterance channel as "STT finished" and hung up.
+   During the ~1 s Deepgram handshake the channel fills, so every utterance ended
+   after 32 chunks (the channel depth) with `close=1000` and an empty transcript.
+   Fix: drop the chunk on `Full`, break only on `Closed`; channel widened to 128.
+3. **Silent Deepgram close frames.** The client discarded the close code, so a
+   rejected connection was indistinguishable from silence. Now logged.
+
 ## Known issues / open items
 
 1. **`capture_ref` PCM returns silence.** The debug-only ch1 tap in `asound.conf` opens
@@ -192,8 +208,9 @@ argument from `notify()`). **Run the Pi build before claiming anything compiles.
    `timeout N speaker-test ... -l 1`, and `pkill -9 speaker-test` if in doubt.
 4. **Wi-Fi, not Ethernet.** Latency figures carry Wi-Fi jitter (ping 7–17 ms, previously
    17–113 ms when power was bad).
-5. **Missing API keys** gate Phases 3, 4 and 5: Cartesia (or ElevenLabs), Deepgram,
-   Picovoice, Parallel, Firecrawl, Spotify.
+5. **Missing keys**: Picovoice (wake word — `/listen` works without it), Parallel,
+   Firecrawl (live tool gates), Spotify. Cartesia + Deepgram are installed on the Pi.
+   Cartesia voice: Skylar `db6b0ed5-d5d3-463d-ae85-518a07d3c2b4`.
 6. **24 h thermal soak (Phase 8) not run.**
 7. `deploy/provision.sh` was written assuming Bookworm; it ran fine on trixie but its
    librespot notes reference the Bookworm archive.
