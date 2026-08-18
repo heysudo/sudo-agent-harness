@@ -336,12 +336,21 @@ impl SpotifyClient {
         // Spotify returns 204 when it accepts the command, even if the Connect
         // receiver then fails to fetch/decrypt audio. Verify that playback really
         // became active so the voice agent never says "Playing ..." after silence.
-        for _ in 0..4 {
+        let mut consecutive_confirmations = 0u8;
+        for _ in 0..8 {
             tokio::time::sleep(Duration::from_millis(500)).await;
             if let Ok(state) = self.state().await
                 && playback_matches(&state, uri)
             {
-                return Ok(());
+                consecutive_confirmations += 1;
+                // A receiver can briefly report "playing" before its audio-key/CDN
+                // fetch fails. Require two seconds of sustained state before claiming
+                // success to the user.
+                if consecutive_confirmations >= 5 {
+                    return Ok(());
+                }
+            } else {
+                consecutive_confirmations = 0;
             }
         }
         bail!(
