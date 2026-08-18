@@ -229,8 +229,9 @@ impl Gateway {
                 Ok(Err(e)) => tracing::warn!(error = %e, "tts failed"),
                 Err(e) => tracing::warn!(error = %e, "tts task panicked"),
             }
-            if speech_completed {
-                self.player.drain().await;
+            if speech_completed && !self.player.drain().await {
+                tracing::warn!("spoken response could not be drained");
+                speech_completed = false;
             }
             self.music.unduck().await;
         }
@@ -304,9 +305,12 @@ impl Gateway {
                 false
             }
         };
-        if completed {
-            self.player.drain().await;
-        }
+        let completed = if completed && !self.player.drain().await {
+            tracing::warn!("spoken response could not be drained");
+            false
+        } else {
+            completed
+        };
         self.music.unduck().await;
         completed
     }

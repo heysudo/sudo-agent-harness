@@ -48,7 +48,9 @@ impl Backend for NullBackend {
     }
 
     fn drain(&mut self) -> Result<()> {
-        self.playhead = None;
+        if let Some(until) = self.playhead.take() {
+            std::thread::sleep(until.saturating_duration_since(Instant::now()));
+        }
         Ok(())
     }
 }
@@ -70,5 +72,15 @@ mod tests {
     fn zero_sample_rate_does_not_divide_by_zero() {
         let mut b = NullBackend::new(0);
         assert!(b.write(&[0, 1, 2]).is_ok());
+    }
+
+    #[test]
+    fn drain_waits_for_the_remaining_playhead() {
+        let mut b = NullBackend::new(16_000);
+        let started = Instant::now();
+        b.write(&vec![0i16; 4800]).unwrap(); // 300 ms, write itself is capped at 250 ms
+        b.drain().unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(280));
+        assert!(b.playhead.is_none());
     }
 }

@@ -38,11 +38,13 @@ pub struct SpeakResult {
     pub samples: usize,
     /// True if playback was cut short by a barge-in.
     pub interrupted: bool,
+    /// Provider/process explicitly confirmed a complete utterance.
+    pub finished: bool,
 }
 
 impl SpeakResult {
     pub fn completed(&self) -> bool {
-        self.samples > 0 && !self.interrupted
+        self.samples > 0 && !self.interrupted && self.finished
     }
 }
 
@@ -375,7 +377,10 @@ impl CartesiaTts {
                     FrameOutcome::Failed
                 }
             }
-            "done" => FrameOutcome::Done,
+            "done" => {
+                result.finished = true;
+                FrameOutcome::Done
+            }
             "error" => {
                 tracing::error!(frame = %text, "cartesia error frame");
                 FrameOutcome::Failed
@@ -519,6 +524,7 @@ impl ElevenLabsTts {
                                 }
                             }
                             if v.get("isFinal").and_then(|x| x.as_bool()).unwrap_or(false) {
+                                result.finished = true;
                                 break;
                             }
                         }
@@ -547,6 +553,9 @@ impl ElevenLabsTts {
 
         // ElevenLabs ties a connection to one generation; reopen for the next.
         *guard = None;
+        if !result.interrupted && !result.finished {
+            bail!("ElevenLabs stream ended before its final frame");
+        }
         Ok(result)
     }
 }
@@ -629,11 +638,18 @@ impl PiperTts {
                 result.samples += samples.len();
                 if !player.play(samples).await {
                     result.interrupted = true;
+                    let _ = child.kill().await;
                     break;
                 }
             }
         }
-        let _ = child.wait().await;
+        let status = child.wait().await.context("waiting for piper")?;
+        if !result.interrupted {
+            if !status.success() {
+                bail!("piper exited with {status}");
+            }
+            result.finished = true;
+        }
         Ok(result)
     }
 }
@@ -672,6 +688,23 @@ mod tests {
         let r = t.request("ctx1", "", false);
         assert_eq!(r["continue"], false);
         assert_eq!(r["transcript"], "");
+    }
+
+    #[test]
+    fn partial_audio_without_provider_completion_is_not_complete() {
+        let partial = SpeakResult {
+            samples: 1600,
+            finished: false,
+            ..Default::default()
+        };
+        assert!(!partial.completed());
+
+        let complete = SpeakResult {
+            samples: 1600,
+            finished: true,
+            ..Default::default()
+        };
+        assert!(complete.completed());
     }
 
     #[test]

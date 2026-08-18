@@ -36,7 +36,7 @@ pub enum AudioMsg {
     /// Discard everything buffered, in software and in the driver.
     Flush,
     /// Wait until queued PCM has reached the device and finished playing.
-    Drain(tokio::sync::oneshot::Sender<()>),
+    Drain(tokio::sync::oneshot::Sender<bool>),
     Stop,
 }
 
@@ -211,10 +211,14 @@ impl AudioPlayer {
                             }
                         }
                         AudioMsg::Drain(done) => {
-                            if let Err(e) = backend.drain() {
-                                tracing::warn!(error = %e, "audio drain failed");
-                            }
-                            let _ = done.send(());
+                            let ok = match backend.drain() {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "audio drain failed");
+                                    false
+                                }
+                            };
+                            let _ = done.send(ok);
                         }
                         AudioMsg::Stop => break,
                     }
@@ -300,7 +304,7 @@ impl AudioPlayer {
         if self.tx.send(AudioMsg::Drain(tx)).await.is_err() {
             return false;
         }
-        rx.await.is_ok()
+        matches!(rx.await, Ok(true))
     }
 
     /// Current generation — callers can check whether their stream is still current.
@@ -397,6 +401,20 @@ mod tests {
         }
     }
 
+    struct FailingDrainBackend;
+
+    impl Backend for FailingDrainBackend {
+        fn write(&mut self, _samples: &[i16]) -> Result<()> {
+            Ok(())
+        }
+        fn discard(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn drain(&mut self) -> Result<()> {
+            anyhow::bail!("simulated drain failure")
+        }
+    }
+
     #[test]
     fn stereo_downmix_averages_without_overflow() {
         // i16::MAX in both channels must stay at i16::MAX, not wrap negative.
@@ -456,6 +474,13 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         assert_eq!(*written.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn drain_reports_backend_failure() {
+        let p = AudioPlayer::spawn_with(Box::new(FailingDrainBackend), 16_000).unwrap();
+        assert!(!p.drain().await);
+        p.stop().await;
     }
 
     #[tokio::test]

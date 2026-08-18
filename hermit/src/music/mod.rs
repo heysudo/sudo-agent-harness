@@ -41,6 +41,8 @@ pub struct MusicController {
     spotify: Option<SpotifyClient>,
     stations: RwLock<BTreeMap<String, String>>,
     state: RwLock<State>,
+    /// Serializes state transitions with their asynchronous backend volume write.
+    volume_transition: tokio::sync::Mutex<()>,
     duck_db: f32,
 }
 
@@ -68,6 +70,7 @@ impl MusicController {
                 duck_depth: 0,
                 now_playing: None,
             }),
+            volume_transition: tokio::sync::Mutex::new(()),
             duck_db,
         }
     }
@@ -185,6 +188,7 @@ impl MusicController {
     }
 
     pub async fn play_spotify(&self, query: &str) -> Result<String> {
+        let _transition = self.volume_transition.lock().await;
         let sp = self.spotify()?;
         // Radio and Spotify share one output device; stop the other first.
         let _ = self.mpv.stop().await;
@@ -231,6 +235,7 @@ impl MusicController {
 
     /// Play an arbitrary stream URL (used by "play NPR live" style news routing).
     pub async fn play_stream(&self, url: &str, label: &str) -> Result<()> {
+        let _transition = self.volume_transition.lock().await;
         if let Some(sp) = &self.spotify {
             let _ = sp.pause().await;
         }
@@ -268,6 +273,7 @@ impl MusicController {
     }
 
     pub async fn stop(&self) -> Result<()> {
+        let _transition = self.volume_transition.lock().await;
         let src = self.source().await;
         match src {
             Source::Spotify => {
@@ -304,6 +310,7 @@ impl MusicController {
 
     /// Set nominal volume and apply it to the active backend.
     pub async fn set_volume(&self, percent: u8) -> Result<()> {
+        let _transition = self.volume_transition.lock().await;
         let v = percent.min(100);
         let target = {
             let mut st = self.state.write().await;
@@ -344,6 +351,7 @@ impl MusicController {
 
     /// Attenuate music while speech is active. Nested callers are reference-counted.
     pub async fn duck(&self) {
+        let _transition = self.volume_transition.lock().await;
         let (should, target) = {
             let mut st = self.state.write().await;
             let first = st.duck_depth == 0;
@@ -362,6 +370,7 @@ impl MusicController {
 
     /// Restore volume after the outermost speech scope finishes.
     pub async fn unduck(&self) {
+        let _transition = self.volume_transition.lock().await;
         let (should, target) = {
             let mut st = self.state.write().await;
             if st.duck_depth == 0 {

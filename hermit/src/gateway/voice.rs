@@ -301,7 +301,9 @@ async fn transcribe_and_answer(
                 // Every response sample has already played. Queue and drain the final
                 // cue before releasing the outer music duck.
                 earcons.play_response_complete(&gateway.player).await;
-                gateway.player.drain().await;
+                if !gateway.player.drain().await {
+                    tracing::warn!("response-complete cue could not be drained");
+                }
             }
             Some(r.answer)
         }
