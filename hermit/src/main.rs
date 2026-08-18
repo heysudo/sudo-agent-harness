@@ -42,6 +42,16 @@ enum Command {
         #[arg(long, default_value = "/opt/hermit/config/hermit.toml")]
         config: PathBuf,
     },
+    /// Score a WAV file with the wake-word model and print per-window scores.
+    ///
+    /// Exists to verify the Rust port against the Python reference on identical
+    /// audio, and to tune `wake.sensitivity` from real recordings.
+    WakeScore {
+        /// 16 kHz mono WAV.
+        wav: PathBuf,
+        #[arg(long, default_value = "/opt/hermit/config/hermit.toml")]
+        config: PathBuf,
+    },
     /// Validate the config file and exit.
     Check {
         #[arg(long, default_value = "/opt/hermit/config/hermit.toml")]
@@ -63,6 +73,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Run { config } => runtime.block_on(run(config)),
         Command::Consolidate { config } => runtime.block_on(consolidate(config)),
+        Command::WakeScore { wav, config } => wake_score(&wav, &config),
         Command::Check { config } => {
             let cfg = config::load(&config)?;
             println!("config OK: {}", cfg.source_path.display());
@@ -326,6 +337,40 @@ async fn consolidate(config_path: PathBuf) -> Result<()> {
         consolidate_prompt: Arc::new(read_prompt(&prompts, "consolidate.md")),
     };
     worker.consolidate(&cfg).await
+}
+
+/// Slide the wake model over a WAV and print scores — the offline twin of what the
+/// voice pipeline does live.
+fn wake_score(wav: &std::path::Path, config: &std::path::Path) -> Result<()> {
+    let cfg = config::load(config)?;
+    let mut reader = std::fs::File::open(wav)
+        .with_context(|| format!("opening {}", wav.display()))?;
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(&mut reader, &mut raw)?;
+    anyhow::ensure!(raw.len() > 44, "{} is not a WAV", wav.display());
+    // Minimal WAV parse: assume canonical 44-byte header, 16-bit mono PCM.
+    let pcm: Vec<i16> = raw[44..]
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .collect();
+    println!("{} samples ({:.1}s at 16kHz)", pcm.len(), pcm.len() as f32 / 16000.0);
+
+    let mut detector = hermit::speech::wake::build(&cfg.wake);
+    let frame = detector.frame_length();
+    anyhow::ensure!(frame > 0, "no wake detector available");
+
+    let mut fired = 0usize;
+    for (i, chunk) in pcm.chunks(frame).enumerate() {
+        if chunk.len() < frame {
+            break;
+        }
+        if detector.process(chunk).is_some() {
+            fired += 1;
+            println!("  WAKE at t={:.2}s", (i + 1) as f32 * frame as f32 / 16000.0);
+        }
+    }
+    println!("detections: {fired}");
+    Ok(())
 }
 
 fn read_prompt(dir: &std::path::Path, name: &str) -> String {

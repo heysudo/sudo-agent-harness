@@ -289,7 +289,7 @@ impl Default for Wake {
             enabled: true,
             keyword: "computer".into(),
             keyword_path: None,
-            sensitivity: 0.6,
+            sensitivity: 0.5,
         }
     }
 }

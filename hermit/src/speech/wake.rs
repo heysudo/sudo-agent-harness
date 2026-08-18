@@ -136,6 +136,24 @@ pub fn build(cfg: &crate::config::Wake) -> Box<dyn WakeDetector> {
         return Box::new(NullWake::new());
     }
 
+    // Prefer the project's own "Hey Sudo" model when its ONNX files are present.
+    // It is the trained, in-house wake word; Porcupine is only a fallback for a box
+    // that has a Picovoice key but not the models.
+    #[cfg(feature = "wake-onnx")]
+    {
+        match super::wake_onnx::HeySudo::from_config(cfg) {
+            Ok(d) => {
+                tracing::info!("hey-sudo wake word active");
+                return Box::new(d);
+            }
+            Err(e) => {
+                // Not fatal, and not even a warning unless nothing else takes over:
+                // a box may legitimately be configured for Porcupine instead.
+                tracing::info!(error = %e, "hey-sudo model unavailable; trying other engines");
+            }
+        }
+    }
+
     #[cfg(feature = "wake-porcupine")]
     {
         match porcupine::Porcupine::from_config(cfg) {
@@ -146,8 +164,8 @@ pub fn build(cfg: &crate::config::Wake) -> Box<dyn WakeDetector> {
             Err(e) => {
                 tracing::error!(
                     error = ?e,
-                    "could not initialize Porcupine; wake word is DISABLED. \
-                     Text and the WebSocket gateway still work."
+                    "could not initialize a wake word engine; wake word is DISABLED. \
+                     Text, /listen and the WebSocket gateway still work."
                 );
             }
         }

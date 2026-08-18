@@ -19,7 +19,7 @@ path = "src/main.rs"
 default = []
 
 # What the Pi actually ships with. `cross build --release --features pi`.
-pi = ["alsa-audio", "wake-porcupine", "systemd"]
+pi = ["alsa-audio", "wake-porcupine", "wake-onnx", "systemd"]
 
 alsa-audio = ["dep:alsa"]
 # Porcupine is bound through its stable C ABI, loaded at runtime with dlopen.
@@ -28,6 +28,11 @@ alsa-audio = ["dep:alsa"]
 # crate to depend on. dlopen also means a missing/incompatible .so degrades to
 # "wake word disabled" instead of refusing to boot. See src/speech/wake.rs.
 wake-porcupine = ["dep:libloading"]
+# "Hey Sudo": the project's own livekit-wakeword/openWakeWord-style model. Three ONNX
+# graphs (mel -> embedding -> classifier) run through onnxruntime, which is dlopen'd
+# at runtime (`load-dynamic`) so a missing libonnxruntime.so degrades to "wake word
+# disabled" exactly like the Porcupine path. See src/speech/wake_onnx.rs.
+wake-onnx = ["dep:ort"]
 systemd = ["dep:sd-notify"]
 
 [dependencies]
@@ -72,6 +77,8 @@ alsa = { version = "0.12.1", optional = true }
 libloading = { version = "0.8", optional = true }
 sd-notify = { version = "0.5.0", optional = true }
 base64 = "0.23.1"
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic", "ndarray"], optional = true }
+ndarray = "0.17.2"
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["full", "test-util"] }

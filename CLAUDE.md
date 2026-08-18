@@ -19,7 +19,7 @@ user-facing doc. This file is the engineering log.
 | 1 — skeleton + streaming | **PASSED on device** (TTFT 366 ms p50, gate 700) |
 | 2 — tools | Code complete; verified against real gpt-oss-120b. Needs `PARALLEL_API_KEY` / `FIRECRAWL_API_KEY` for live gates |
 | 3 — voice out | **PASSED on device** — first audio 654 / 875 ms (gate 1200) |
-| 4 — voice in | **PASSED on device** via `/listen` — live speech transcribed, answered, spoken; first audio 983 ms. Wake word itself still needs `PICOVOICE_ACCESS_KEY` + `.ppn` |
+| 4 — voice in | **PASSED on device** via `/listen` — live speech transcribed, answered, spoken; first audio 983 ms. Wake word = **"Hey Sudo"**, ported and verified against the Python reference; live hands-free trigger not yet caught on tape |
 | 5 — music | Code complete; needs Spotify Premium creds; mpv/librespot sidecars not yet installed |
 | 6 — memory | **PASSED** — recall 0.7 ms, cross-session verified with real model |
 | 7 — learning loop | **PASSED** — facts extracted, stored, recalled in a fresh session |
@@ -175,6 +175,52 @@ argument from `notify()`). **Run the Pi build before claiming anything compiles.
 
 ---
 
+## The wake word is "Hey Sudo" — NOT Porcupine
+
+The project already trained its own wake word. It lives in `heysudo/sudo` at
+`sudoedge/models/hey_sudo.onnx` and is a **livekit-wakeword** (openWakeWord-style)
+classifier. Do not go looking for a Picovoice key — it is not needed and the
+Porcupine path is only a fallback.
+
+`src/speech/wake_onnx.rs` is a faithful Rust port of `livekit.wakeword`'s
+`WakeWordModel.predict`. Three ONNX graphs run in sequence per 2.0 s window:
+
+```
+2.0 s int16 (25 x 80 ms frames)
+  -> /32768 to f32
+  -> melspectrogram.onnx    (1, samples) -> (time, 32) dB mel, then x/10 + 2
+  -> embedding_model.onnx   76-mel windows @ stride 8 -> (96,) each
+  -> last 16 embeddings -> (1, 16, 96)
+  -> hey_sudo.onnx          -> score, fire at >= 0.5
+```
+
+**Port verified numerically against the Python reference on identical audio:**
+
+| clip | Python | Rust |
+|---|---|---|
+| TTS "hey sudo" (padded to >2 s) | 0.753 FIRES | **0.747 WAKE @ 2.16 s** |
+| TTS "hello there, how are you today" | 0.007 no | **0 detections** |
+
+The small delta is window alignment (Rust steps on 80 ms frame boundaries), not a
+maths difference.
+
+Gotchas:
+- **The classifier needs a full 2.0 s window.** A 1.3 s clip scores 0.0 forever. Pad
+  short test clips with silence or the result is meaningless.
+- `wake.sensitivity` is the **detection threshold** (0..1) for this engine, not a
+  Porcupine sensitivity. 0.5 is the reference default.
+- The two upstream graphs must stay the exact versions the classifier was trained
+  against. `models/SHA256SUMS` pins all three.
+- onnxruntime is `dlopen`'d (`ort` `load-dynamic`). `libonnxruntime.so` 1.29.0 for
+  aarch64 is installed to `/usr/local/lib` on the Pi; set `ORT_DYLIB_PATH` if it
+  moves. Missing library => wake word disabled, everything else still runs.
+- `hermit wake-score <file.wav>` scores a recording offline — use it to tune the
+  threshold from real room audio instead of guessing.
+- The detector logs a heartbeat (`hey-sudo listening windows=N max_score=X`) every
+  ~4 s. **A silently starved detector looks exactly like a quiet room**; the
+  heartbeat is how you tell them apart. Confirmed live at `max_score=0.098` on
+  ordinary room speech.
+
 ## Bugs found and fixed on hardware in the voice phases (do not reintroduce)
 
 1. **Keepalive underrun storm.** The first keepalive implementation slept when a
@@ -208,9 +254,13 @@ argument from `notify()`). **Run the Pi build before claiming anything compiles.
    `timeout N speaker-test ... -l 1`, and `pkill -9 speaker-test` if in doubt.
 4. **Wi-Fi, not Ethernet.** Latency figures carry Wi-Fi jitter (ping 7–17 ms, previously
    17–113 ms when power was bad).
-5. **Missing keys**: Picovoice (wake word — `/listen` works without it), Parallel,
-   Firecrawl (live tool gates), Spotify. Cartesia + Deepgram are installed on the Pi.
-   Cartesia voice: Skylar `db6b0ed5-d5d3-463d-ae85-518a07d3c2b4`.
+5. **Missing keys**: Parallel, Firecrawl (live tool gates), Spotify. Cartesia +
+   Deepgram are installed on the Pi. Cartesia voice: Skylar
+   `db6b0ed5-d5d3-463d-ae85-518a07d3c2b4`. Picovoice is NOT required — see the
+   "Hey Sudo" section.
+6. **Live hands-free wake not yet demonstrated.** Every attempt so far captured an
+   empty room or a TV (Deepgram transcribed a documentary), never the phrase. The
+   detector heartbeat proves it is scoring; it simply has not heard "hey sudo" yet.
 6. **24 h thermal soak (Phase 8) not run.**
 7. `deploy/provision.sh` was written assuming Bookworm; it ran fine on trixie but its
    librespot notes reference the Bookworm archive.

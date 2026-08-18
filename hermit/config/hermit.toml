@@ -92,9 +92,14 @@ max_utterance_ms = 20000
 
 [wake]
 enabled = true
-keyword = "computer"     # needs /opt/hermit/lib/keywords/computer_raspberry-pi.ppn
-# keyword_path = "/opt/hermit/lib/keywords/custom.ppn"
-sensitivity = 0.6
+# The active engine is the project's own "Hey Sudo" model (three ONNX graphs in
+# /opt/hermit/models). `keyword` below only matters for the Porcupine fallback.
+keyword = "computer"     # Porcupine fallback only
+# keyword_path = "/opt/hermit/models/hey_sudo.onnx"   # override the classifier
+# For hey-sudo this is the DETECTION THRESHOLD (0..1), not a Porcupine sensitivity.
+# 0.5 is the livekit-wakeword / openWakeWord reference default. Lower = more
+# sensitive and more false accepts. Tune with: hermit wake-score <recording.wav>
+sensitivity = 0.5
 
 [audio]
 playback_pcm = "hermit_out"   # defined in /etc/asound.conf
