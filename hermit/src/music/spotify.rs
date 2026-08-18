@@ -323,15 +323,32 @@ impl SpotifyClient {
         let path = format!("/me/player/play?device_id={device}");
 
         match self.put(&path, Some(body.clone())).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {}
             Err(e) => {
                 // Most likely the device id went stale (librespot restarted).
                 tracing::warn!(error = %e, "spotify play failed; rediscovering device and retrying");
                 self.invalidate_device().await;
                 let device = self.device_id().await?;
-                self.put(&format!("/me/player/play?device_id={device}"), Some(body)).await
+                self.put(&format!("/me/player/play?device_id={device}"), Some(body)).await?;
             }
         }
+
+        // Spotify returns 204 when it accepts the command, even if the Connect
+        // receiver then fails to fetch/decrypt audio. Verify that playback really
+        // became active so the voice agent never says "Playing ..." after silence.
+        for _ in 0..4 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if let Ok(state) = self.state().await
+                && playback_matches(&state, uri)
+            {
+                return Ok(());
+            }
+        }
+        bail!(
+            "Spotify accepted the request, but playback did not start on {:?}. \
+             Check hermit-librespot logs; radio remains available.",
+            self.device_name
+        )
     }
 
     /// Transfer playback to our device without changing what is queued.
@@ -392,6 +409,16 @@ impl SpotifyClient {
     }
 }
 
+fn playback_matches(state: &PlaybackState, requested_uri: &str) -> bool {
+    if !state.is_playing {
+        return false;
+    }
+    if requested_uri.starts_with("spotify:track:") {
+        return state.item.as_ref().is_some_and(|item| item.uri == requested_uri);
+    }
+    true
+}
+
 async fn expect_ok(resp: reqwest::Response) -> Result<()> {
     let status = resp.status();
     if status.is_success() {
@@ -414,6 +441,24 @@ async fn expect_ok(resp: reqwest::Response) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_confirmation_rejects_silence_and_wrong_track() {
+        let mut state = PlaybackState::default();
+        assert!(!playback_matches(&state, "spotify:track:wanted"));
+
+        state.is_playing = true;
+        state.item = Some(Track {
+            uri: "spotify:track:other".into(),
+            name: "Other".into(),
+            artists: vec![],
+        });
+        assert!(!playback_matches(&state, "spotify:track:wanted"));
+        assert!(playback_matches(&state, "spotify:album:any"));
+
+        state.item.as_mut().unwrap().uri = "spotify:track:wanted".into();
+        assert!(playback_matches(&state, "spotify:track:wanted"));
+    }
 
     #[test]
     fn track_uris_go_in_uris_and_contexts_in_context_uri() {
