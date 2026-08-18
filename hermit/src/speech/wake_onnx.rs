@@ -50,6 +50,17 @@ const MEL_BINS: usize = 32;
 /// Reference default from `livekit.wakeword` / openWakeWord.
 pub const DEFAULT_THRESHOLD: f32 = 0.5;
 
+/// Score every Nth 80 ms frame rather than every frame.
+///
+/// Measured on the Pi 4: one full-window score (mel + 9 embeddings + classifier)
+/// costs ~200 ms. Scoring every 80 ms frame therefore runs ~2.5x behind real time;
+/// the mic channel backs up, ALSA overruns, and the detector ends up scoring gapped
+/// audio — live scores collapse to a fraction of what the same audio scores offline
+/// (observed: 0.16 live vs 0.80 offline on an identical utterance). At stride 4 the
+/// scoring cadence is 320 ms > cost, the pipeline keeps up, and a 2 s window still
+/// overlaps the phrase several times. Worst-case added detection latency: 320 ms.
+const SCORE_STRIDE_FRAMES: u32 = 4;
+
 pub struct HeySudo {
     mel: Session,
     embed: Session,
@@ -64,6 +75,13 @@ pub struct HeySudo {
     /// detector that is silently starved of audio looks identical to a quiet room.
     windows_scored: u64,
     recent_max: f32,
+    /// Frames since the last score, for [`SCORE_STRIDE_FRAMES`].
+    frames_since_score: u32,
+    /// Rolling average score cost, surfaced in the heartbeat so a regression in
+    /// scoring speed is visible in logs rather than as mysteriously low scores.
+    avg_score_ms: f32,
+    /// Most recent score, exposed via `WakeDetector::last_score` for the console.
+    last_score: f32,
 }
 
 /// Where the three models live, resolved with an env override for flexibility.
@@ -99,8 +117,10 @@ impl HeySudo {
             }
         }
 
-        // The models are tiny; one intra-op thread keeps them off the hot cores and
-        // matches the reference, which caps onnxruntime to a single thread.
+        // Two intra-op threads: the reference caps onnxruntime at 1 to protect a
+        // busy Python process, but this daemon's cores are idle while it waits on
+        // the network, and halving the ~200 ms score cost directly improves how
+        // often the stride lets us score.
         //
         // ort's builder/error types are not Send+Sync, so `?` cannot cross a closure
         // boundary here; each session is built inline. `map_err(anyhow)` converts the
@@ -108,7 +128,7 @@ impl HeySudo {
         let session = |path: &Path, what: &str| -> Result<Session> {
             Session::builder()
                 .map_err(|e| anyhow::anyhow!("ort: {e}"))?
-                .with_intra_threads(1)
+                .with_intra_threads(2)
                 .map_err(|e| anyhow::anyhow!("ort: {e}"))?
                 .commit_from_file(path)
                 .map_err(|e| anyhow::anyhow!("loading {what}: {e}"))
@@ -133,6 +153,9 @@ impl HeySudo {
             cooldown: 0,
             windows_scored: 0,
             recent_max: 0.0,
+            frames_since_score: 0,
+            avg_score_ms: 0.0,
+            last_score: 0.0,
         })
     }
 
@@ -230,6 +253,10 @@ impl WakeDetector for HeySudo {
         FRAME_SAMPLES
     }
 
+    fn last_score(&self) -> Option<(f32, f32)> {
+        Some((self.last_score, self.threshold))
+    }
+
     fn process(&mut self, frame: &[i16]) -> Option<usize> {
         if frame.len() != FRAME_SAMPLES {
             return None;
@@ -247,17 +274,33 @@ impl WakeDetector for HeySudo {
             self.cooldown -= 1;
             return None;
         }
+        // Stride: scoring every frame costs more than real time on the Pi and
+        // corrupts the capture stream (see SCORE_STRIDE_FRAMES).
+        self.frames_since_score += 1;
+        if self.frames_since_score < SCORE_STRIDE_FRAMES {
+            return None;
+        }
+        self.frames_since_score = 0;
 
+        let scored_at = std::time::Instant::now();
         match self.score_window() {
             Ok(score) => {
+                self.last_score = score;
                 // Heartbeat every ~4 s of audio: proves the detector is being fed and
                 // gives a real floor/ceiling for tuning `wake.sensitivity`.
                 self.windows_scored += 1;
                 self.recent_max = self.recent_max.max(score);
-                if self.windows_scored % 50 == 0 {
+                let cost = scored_at.elapsed().as_secs_f32() * 1000.0;
+                self.avg_score_ms = if self.avg_score_ms == 0.0 {
+                    cost
+                } else {
+                    self.avg_score_ms * 0.9 + cost * 0.1
+                };
+                if self.windows_scored.is_multiple_of(50) {
                     tracing::info!(
                         windows = self.windows_scored,
                         max_score = self.recent_max,
+                        score_ms = self.avg_score_ms,
                         threshold = self.threshold,
                         "hey-sudo listening"
                     );

@@ -20,6 +20,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+/// dBFS of a mono i16 frame, for the console level meter.
+fn frame_dbfs(samples: &[i16]) -> f32 {
+    if samples.is_empty() {
+        return -99.0;
+    }
+    let sum_sq: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    let rms = (sum_sq / samples.len() as f64).sqrt() / 32768.0;
+    if rms <= 0.0 { -99.0 } else { (20.0 * rms.log10()) as f32 }
+}
+
 /// Audio captured from the microphone, handed to the async side.
 pub type MicRx = tokio::sync::mpsc::Receiver<Vec<i16>>;
 pub type MicTx = tokio::sync::mpsc::Sender<Vec<i16>>;
@@ -56,6 +66,8 @@ pub async fn run(
 
     let mut feeder = FrameFeeder::new(detector);
     let listening = Arc::new(AtomicBool::new(false));
+    // Console telemetry + control (sudo-console). All throttled internally.
+    let mut state = crate::state_io::StateWriter::new();
 
     tracing::info!("voice pipeline ready; waiting for the wake word");
 
@@ -64,14 +76,32 @@ pub async fn run(
         let start_turn = tokio::select! {
             frame = mic_rx.recv() => match frame {
                 Some(samples) => {
+                    // Console control: mic mute discards frames BEFORE the wake word
+                    // and STT — nothing is detected, nothing leaves the device.
+                    let ctl = state.read_control();
+                    gateway.player.set_muted(ctl.speaker_muted);
+                    if ctl.mic_muted {
+                        state.write_live(serde_json::json!({
+                            "ww": null, "rms": -99.0, "listening": false,
+                            "mic_muted": true, "speaker_muted": ctl.speaker_muted,
+                        }));
+                        continue;
+                    }
                     // While a turn is being transcribed, audio is forwarded to STT by
                     // the utterance task rather than scanned for the wake word.
                     if listening.load(Ordering::Acquire) {
                         continue;
                     }
                     let hit = feeder.push(&samples).is_some();
+                    let (score, threshold) = feeder.last_score().unwrap_or((0.0, 0.0));
+                    state.write_live(serde_json::json!({
+                        "ww": score, "ww_threshold": threshold,
+                        "rms": frame_dbfs(&samples), "listening": false,
+                        "mic_muted": false, "speaker_muted": ctl.speaker_muted,
+                    }));
                     if hit {
                         feeder.reset();
+                        state.emit("ww_fired", serde_json::json!({"score": score}));
                         tracing::info!("wake word detected");
                     }
                     hit
@@ -284,11 +314,25 @@ pub fn spawn_capture(cfg: &crate::config::Audio) -> anyhow::Result<MicRx> {
                 }
             };
             let mut buf = vec![0i16; frames.max(256)];
+            let mut dropped: u64 = 0;
             loop {
                 match io.readi(&mut buf) {
                     Ok(n) if n > 0 => {
-                        if tx.blocking_send(buf[..n].to_vec()).is_err() {
-                            break; // consumer gone
+                        // try_send, never block: if the consumer lags, dropping a
+                        // 20 ms chunk here is strictly better than blocking, which
+                        // backs up into the ALSA ring, overruns it, and hands the
+                        // wake detector gapped audio for MINUTES afterwards. A
+                        // dropped chunk costs one frame; a blocked read costs the
+                        // whole stream's continuity.
+                        match tx.try_send(buf[..n].to_vec()) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                dropped += 1;
+                                if dropped.is_power_of_two() {
+                                    tracing::warn!(dropped, "mic consumer lagging; dropping capture chunks");
+                                }
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
                     Ok(_) => {}

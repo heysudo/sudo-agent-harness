@@ -39,6 +39,11 @@ pub trait WakeDetector: Send {
     fn frame_length(&self) -> usize;
     /// Returns the index of the keyword detected in this frame, if any.
     fn process(&mut self, frame: &[i16]) -> Option<usize>;
+    /// Most recent detection score (0..1) and the firing threshold, for telemetry.
+    /// Engines without a meaningful score (Porcupine, Null) return None.
+    fn last_score(&self) -> Option<(f32, f32)> {
+        None
+    }
 }
 
 /// Boxed detectors are detectors too — `build()` returns a trait object and the
@@ -49,6 +54,9 @@ impl WakeDetector for Box<dyn WakeDetector> {
     }
     fn process(&mut self, frame: &[i16]) -> Option<usize> {
         (**self).process(frame)
+    }
+    fn last_score(&self) -> Option<(f32, f32)> {
+        (**self).last_score()
     }
 }
 
@@ -125,6 +133,11 @@ impl<D: WakeDetector> FrameFeeder<D> {
 
     pub fn buffered(&self) -> usize {
         self.buffer.len()
+    }
+
+    /// Telemetry passthrough to the wrapped detector.
+    pub fn last_score(&self) -> Option<(f32, f32)> {
+        self.detector.last_score()
     }
 }
 

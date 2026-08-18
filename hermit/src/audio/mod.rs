@@ -51,6 +51,10 @@ pub struct AudioPlayer {
     tx: tokio::sync::mpsc::Sender<AudioMsg>,
     generation: Arc<AtomicU64>,
     sample_rate: u32,
+    /// Speaker mute (console `control.json`). Muted playback writes ZEROS rather
+    /// than skipping writes: the XVF3800's capture clock is slaved to playback, so
+    /// a mute that stopped the stream would also deafen the microphone.
+    muted: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AudioPlayer {
@@ -207,7 +211,16 @@ impl AudioPlayer {
                 tracing::debug!("audio thread exiting");
             })?;
 
-        Ok(Self { tx, generation, sample_rate })
+        Ok(Self { tx, generation, sample_rate, muted: Arc::new(std::sync::atomic::AtomicBool::new(false)) })
+    }
+
+    /// Speaker mute. Audio keeps flowing as silence so capture stays clocked.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Release);
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Acquire)
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -215,7 +228,10 @@ impl AudioPlayer {
     }
 
     /// Queue PCM for playback. Returns false if the player has shut down.
-    pub async fn play(&self, samples: Vec<i16>) -> bool {
+    pub async fn play(&self, mut samples: Vec<i16>) -> bool {
+        if self.is_muted() {
+            samples.iter_mut().for_each(|s| *s = 0);
+        }
         let generation = self.generation.load(Ordering::Acquire);
         self.tx.send(AudioMsg::Pcm { generation, samples }).await.is_ok()
     }
@@ -224,7 +240,10 @@ impl AudioPlayer {
     ///
     /// Used from contexts that must not block. A dropped chunk is a click; a
     /// blocked hot path is a hang, so this is the right trade there.
-    pub fn try_play(&self, samples: Vec<i16>) -> bool {
+    pub fn try_play(&self, mut samples: Vec<i16>) -> bool {
+        if self.is_muted() {
+            samples.iter_mut().for_each(|s| *s = 0);
+        }
         let generation = self.generation.load(Ordering::Acquire);
         match self.tx.try_send(AudioMsg::Pcm { generation, samples }) {
             Ok(()) => true,

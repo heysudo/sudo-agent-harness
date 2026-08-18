@@ -10,4 +10,5 @@ pub mod orchestrator;
 pub mod reflect;
 pub mod router;
 pub mod speech;
+pub mod state_io;
 pub mod tools;

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# sudo-console — attach the live TUI to the HERMIT device from the dev machine.
+# (On the Pi itself, run:  python3 ~/hermit-deploy/tools/sudo-console.py)
+set -euo pipefail
+HOST="${1:-<pi-host>}"
+# HERMIT_STATE_DIR: /run/hermit under systemd; test sessions use /tmp/hermit-state.
+exec ssh -t "$HOST" "HERMIT_STATE_DIR=\${HERMIT_STATE_DIR:-/tmp/hermit-state} python3 ~/hermit-deploy/tools/sudo-console.py"

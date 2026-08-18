@@ -221,20 +221,53 @@ Gotchas:
   heartbeat is how you tell them apart. Confirmed live at `max_score=0.098` on
   ordinary room speech.
 
+## sudo-console (operator TUI)
+
+`hermit/tools/sudo-console.py` — borrowed from the b2-34 `sudo-console` design.
+Attach from the dev machine with `scripts/sudo-console` (ssh -t wrapper), or on the
+Pi: `HERMIT_STATE_DIR=... python3 ~/hermit-deploy/tools/sudo-console.py`. stdlib
+only, curses; NOT in the hot path.
+
+Decoupling contract (`src/state_io.rs`, tmpfs, `HERMIT_STATE_DIR`, default
+`/run/hermit`, test sessions use `/tmp/hermit-state`):
+- `live.json` — 8 Hz: `ww` score, `ww_threshold`, `rms` dBFS, `listening`, mute flags.
+  Stale >3 s = daemon dead.
+- `events.jsonl` — ring of 500: `ww_fired` etc.
+- `control.json` — the ONE inbound path: console writes `mic_muted`/`speaker_muted`;
+  daemon polls at 8 Hz. Missing/corrupt file = nothing muted (fail-safe, verified).
+
+Keys: `m` mic mute (frames dropped before wake/STT), `s` speaker mute, `c` clear,
+`q` quit (clears mutes on exit).
+
+Behaviours verified on hardware: mic mute -> rms −99/ww null in live.json; speaker
+mute keeps writing ZEROS (capture clock stays alive — do not "optimise" into
+skipping writes); deleting control.json unmutes everything.
+
+Open item: under systemd, /run/hermit is owned by the hermit user; the console run
+as another user cannot write control.json. b2-34 solved this with a sudoers entry.
+For now test sessions use /tmp/hermit-state.
+
 ## Bugs found and fixed on hardware in the voice phases (do not reintroduce)
 
-1. **Keepalive underrun storm.** The first keepalive implementation slept when a
+1. **Wake scoring must be strided.** One full-window score costs ~120 ms on the Pi
+   (2 onnxruntime threads). Scoring every 80 ms frame runs ~2.5x behind real time,
+   backs up the mic channel, and the ALSA overruns corrupt ALL downstream audio —
+   live scores collapse (0.16 live vs 0.80 offline, same utterance). Fix:
+   `SCORE_STRIDE_FRAMES = 4` (score every 320 ms) + capture thread uses `try_send`
+   and drops chunks instead of ever blocking. Heartbeat logs `score_ms` so a
+   regression shows up in logs, not as mystery deafness.
+2. **Keepalive underrun storm.** The first keepalive implementation slept when a
    write returned "fast". A blocking ALSA write returns when frames are *accepted*,
    not played, so on an empty buffer it returns instantly; sleeping on that starves
    the buffer and produced an `EPIPE` every ~20 ms. Fix: never sleep — write straight
    back and let ALSA block. Backends that don't block (null/test) pace themselves in
    `write()`. Result: 0 underruns.
-2. **Utterances truncated after exactly 32 frames.** `forward_until_done` treated a
+3. **Utterances truncated after exactly 32 frames.** `forward_until_done` treated a
    `TrySendError::Full` on the utterance channel as "STT finished" and hung up.
    During the ~1 s Deepgram handshake the channel fills, so every utterance ended
    after 32 chunks (the channel depth) with `close=1000` and an empty transcript.
    Fix: drop the chunk on `Full`, break only on `Closed`; channel widened to 128.
-3. **Silent Deepgram close frames.** The client discarded the close code, so a
+4. **Silent Deepgram close frames.** The client discarded the close code, so a
    rejected connection was indistinguishable from silence. Now logged.
 
 ## Known issues / open items

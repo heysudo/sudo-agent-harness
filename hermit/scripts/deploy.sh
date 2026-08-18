@@ -48,6 +48,7 @@ $RSYNC deploy/ scripts/  "$HOST:~/hermit-deploy/deploy/"
 $RSYNC config/           "$HOST:~/hermit-deploy/config/"
 $RSYNC firmware/         "$HOST:~/respeaker-fw/"
 $RSYNC models/           "$HOST:~/hermit-deploy/models/"
+$RSYNC tools/            "$HOST:~/hermit-deploy/tools/"
 
 # If provisioned, install into place. Uses sudo; the hermit user owns /opt/hermit.
 if ssh "$HOST" 'test -d /opt/hermit/bin'; then
