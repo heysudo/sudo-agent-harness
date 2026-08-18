@@ -72,13 +72,13 @@ struct SearchResponse {
 #[derive(Debug, Deserialize)]
 struct TrackPage {
     #[serde(default)]
-    items: Vec<Track>,
+    items: Vec<Option<Track>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ItemPage {
     #[serde(default)]
-    items: Vec<SimpleItem>,
+    items: Vec<Option<SimpleItem>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -294,7 +294,7 @@ impl SpotifyClient {
         // Prefer a track, then album, then playlist, then artist. A bare artist
         // name most often means "play this artist", but a track match on the exact
         // phrase is the stronger signal, so tracks win.
-        if let Some(t) = parsed.tracks.as_ref().and_then(|p| p.items.first()) {
+        if let Some(t) = parsed.tracks.as_ref().and_then(|p| p.items.iter().flatten().next()) {
             let artists = t.artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
             let label = if artists.is_empty() {
                 t.name.clone()
@@ -304,7 +304,7 @@ impl SpotifyClient {
             return Ok((t.uri.clone(), label));
         }
         for page in [&parsed.albums, &parsed.playlists, &parsed.artists] {
-            if let Some(item) = page.as_ref().and_then(|p| p.items.first()) {
+            if let Some(item) = page.as_ref().and_then(|p| p.items.iter().flatten().next()) {
                 return Ok((item.uri.clone(), item.name.clone()));
             }
         }
@@ -513,5 +513,16 @@ mod tests {
         let r: SearchResponse = serde_json::from_str(r#"{"tracks":{"items":[]}}"#).unwrap();
         assert!(r.albums.is_none());
         assert!(r.tracks.unwrap().items.is_empty());
+    }
+
+    #[test]
+    fn search_response_tolerates_null_items() {
+        let r: SearchResponse = serde_json::from_str(
+            r#"{"tracks":{"items":[null,{"uri":"spotify:track:x","name":"X","artists":[]}]},"playlists":{"items":[null]}}"#,
+        )
+        .unwrap();
+        let track = r.tracks.unwrap().items.into_iter().flatten().next().unwrap();
+        assert_eq!(track.uri, "spotify:track:x");
+        assert!(r.playlists.unwrap().items.into_iter().flatten().next().is_none());
     }
 }
