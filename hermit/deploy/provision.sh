@@ -1015,9 +1015,10 @@ SupplementaryGroups=audio
 # music plays.  --bitrate 160 is deliberate: this is a 3 W mono speaker fed by
 # a 16 kHz-class pipeline, 320 kbit buys nothing audible and costs bandwidth
 # and CPU on a 1 GB Pi.
-# NOTE: librespot's CLI has changed across releases.  If this unit fails with
-# 'unexpected argument', run 'librespot --help' and adjust; the flags below
-# target librespot 0.4-0.6.
+# v0.8.0+ stores reusable Connect credentials in --system-cache. Keep that
+# inside the writable state directory because ProtectHome=yes blocks the
+# user-level default cache. Avahi is selected explicitly to match the build.
+# Audio caching remains disabled on the Pi's SD card.
 ExecStart=${librespot_bin} \\
     --name Hermit \\
     --backend alsa \\
@@ -1025,6 +1026,8 @@ ExecStart=${librespot_bin} \\
     --bitrate 160 \\
     --initial-volume 60 \\
     --volume-ctrl linear \\
+    --zeroconf-backend avahi \\
+    --system-cache ${STATE_DIR}/librespot \\
     --cache ${STATE_DIR}/librespot \\
     --disable-audio-cache
 
