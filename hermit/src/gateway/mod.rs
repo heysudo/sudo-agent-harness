@@ -31,6 +31,8 @@ pub type TextSink = tokio::sync::mpsc::UnboundedSender<String>;
 pub struct TurnResult {
     pub answer: String,
     pub fast_path: bool,
+    /// At least one complete, non-interrupted spoken response was queued and drained.
+    pub speech_completed: bool,
 }
 
 pub struct Gateway {
@@ -112,7 +114,11 @@ impl Gateway {
 
         let utterance = utterance.trim();
         if utterance.is_empty() {
-            return Ok(TurnResult { answer: String::new(), fast_path: true });
+            return Ok(TurnResult {
+                answer: String::new(),
+                fast_path: true,
+                speech_completed: false,
+            });
         }
 
         // ---- fast path (spec §4.2) --------------------------------------
@@ -127,9 +133,7 @@ impl Gateway {
             if let Some(tx) = &text {
                 let _ = tx.send(answer.clone());
             }
-            if speak {
-                self.speak_once(&answer).await;
-            }
+            let speech_completed = speak && self.speak_once(&answer).await;
             // Device commands are conversational too — record them so "turn it up"
             // followed by "actually, back down" has context.
             let _ = self.store.record_message("user", utterance);
@@ -137,7 +141,11 @@ impl Gateway {
             timings.first_audio_ms = timings.total_ms;
             timings.finish();
             timings.emit();
-            return Ok(TurnResult { answer, fast_path: true });
+            return Ok(TurnResult {
+                answer,
+                fast_path: true,
+                speech_completed,
+            });
         }
 
         // ---- agent path -------------------------------------------------
@@ -203,15 +211,15 @@ impl Gateway {
 
         let (ack_at, tool_names) = pump.await.unwrap_or((None, Vec::new()));
 
+        let mut speech_completed = false;
         if let Some(task) = tts_task {
             match task.await {
                 Ok(Ok(sr)) => {
+                    speech_completed = sr.completed();
                     timings.tts_ttfa_ms = sr.ttfa_ms;
                     // First audio is whichever the user actually heard first: the
                     // canned acknowledgment, or the model's own first clause.
-                    let spoken_at = sr
-                        .ttfa_ms
-                        .map(|_| crate::metrics::ms_since(turn_started));
+                    let spoken_at = sr.ttfa_ms.map(|_| crate::metrics::ms_since(turn_started));
                     timings.first_audio_ms = match (ack_at, spoken_at) {
                         (Some(a), Some(s)) => Some(a.min(s)),
                         (Some(a), None) => Some(a),
@@ -220,6 +228,9 @@ impl Gateway {
                 }
                 Ok(Err(e)) => tracing::warn!(error = %e, "tts failed"),
                 Err(e) => tracing::warn!(error = %e, "tts task panicked"),
+            }
+            if speech_completed {
+                self.player.drain().await;
             }
             self.music.unduck().await;
         }
@@ -233,7 +244,7 @@ impl Gateway {
                     let _ = tx.send(msg.clone());
                 }
                 if speak {
-                    self.speak_once(&msg).await;
+                    speech_completed = self.speak_once(&msg).await;
                 }
                 msg
             }
@@ -257,7 +268,11 @@ impl Gateway {
 
         timings.finish();
         timings.emit();
-        Ok(TurnResult { answer, fast_path: false })
+        Ok(TurnResult {
+            answer,
+            fast_path: false,
+            speech_completed,
+        })
     }
 
     async fn run_device_command(&self, cmd: &DeviceCommand) -> String {
@@ -273,19 +288,27 @@ impl Gateway {
     }
 
     /// Speak a single fixed string (device replies, research announcements).
-    pub async fn speak_once(&self, text: &str) {
+    pub async fn speak_once(&self, text: &str) -> bool {
         if !self.tts.is_enabled() || text.trim().is_empty() {
-            return;
+            return false;
         }
         let generation = self.player.generation();
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         let _ = tx.send(text.to_string()).await;
         drop(tx);
         self.music.duck().await;
-        if let Err(e) = self.tts.speak(rx, &self.player, generation).await {
-            tracing::warn!(error = %e, "speaking failed");
+        let completed = match self.tts.speak(rx, &self.player, generation).await {
+            Ok(sr) => sr.completed(),
+            Err(e) => {
+                tracing::warn!(error = %e, "speaking failed");
+                false
+            }
+        };
+        if completed {
+            self.player.drain().await;
         }
         self.music.unduck().await;
+        completed
     }
 
     /// Deliver a finished background-research result (spec §4.3).
@@ -326,6 +349,9 @@ mod tests {
             crate::router::route("pause", &stations),
             Route::Device(DeviceCommand::Pause)
         ));
-        assert!(matches!(crate::router::route("why is the sky blue", &stations), Route::Agent));
+        assert!(matches!(
+            crate::router::route("why is the sky blue", &stations),
+            Route::Agent
+        ));
     }
 }

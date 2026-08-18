@@ -31,7 +31,8 @@ struct State {
     source: Source,
     /// Nominal user-facing volume, 0–100, independent of ducking.
     volume: u8,
-    ducked: bool,
+    /// Reference count so nested voice + TTS scopes cannot unduck each other early.
+    duck_depth: u32,
     now_playing: Option<String>,
 }
 
@@ -64,7 +65,7 @@ impl MusicController {
             state: RwLock::new(State {
                 source: Source::None,
                 volume: default_volume.min(100),
-                ducked: false,
+                duck_depth: 0,
                 now_playing: None,
             }),
             duck_db,
@@ -86,7 +87,10 @@ impl MusicController {
             Ok(text) => match toml::from_str::<File>(&text) {
                 Ok(f) => {
                     tracing::info!(count = f.stations.len(), path = %path.display(), "stations loaded");
-                    f.stations.into_iter().map(|(k, v)| (k.to_lowercase(), v)).collect()
+                    f.stations
+                        .into_iter()
+                        .map(|(k, v)| (k.to_lowercase(), v))
+                        .collect()
                 }
                 Err(e) => {
                     tracing::error!(error = %e, path = %path.display(), "stations.toml is invalid");
@@ -189,8 +193,13 @@ impl MusicController {
             let mut st = self.state.write().await;
             st.source = Source::Spotify;
             st.now_playing = Some(label.clone());
-            st.ducked = false;
-            st.volume
+            if st.duck_depth > 0 {
+                (st.volume as f32 * db_to_scale(self.duck_db))
+                    .round()
+                    .clamp(0.0, 100.0) as u8
+            } else {
+                st.volume
+            }
         };
         let _ = sp.set_volume(vol).await;
         Ok(label)
@@ -202,12 +211,20 @@ impl MusicController {
             let key = name.trim().to_lowercase();
             stations
                 .get(&key)
-                .or_else(|| stations.iter().find(|(k, _)| key.starts_with(k.as_str())).map(|(_, v)| v))
+                .or_else(|| {
+                    stations
+                        .iter()
+                        .find(|(k, _)| key.starts_with(k.as_str()))
+                        .map(|(_, v)| v)
+                })
                 .cloned()
         };
         let Some(url) = url else {
             let known = self.station_names().await;
-            bail!("no station named {name:?}. Known stations: {}", known.join(", "));
+            bail!(
+                "no station named {name:?}. Known stations: {}",
+                known.join(", ")
+            );
         };
         self.play_stream(&url, name).await
     }
@@ -222,8 +239,13 @@ impl MusicController {
             let mut st = self.state.write().await;
             st.source = Source::Radio;
             st.now_playing = Some(label.to_string());
-            st.ducked = false;
-            st.volume
+            if st.duck_depth > 0 {
+                (st.volume as f32 * db_to_scale(self.duck_db))
+                    .round()
+                    .clamp(0.0, 100.0) as u8
+            } else {
+                st.volume
+            }
         };
         self.mpv.set_volume(vol).await?;
         Ok(())
@@ -259,7 +281,6 @@ impl MusicController {
         let mut st = self.state.write().await;
         st.source = Source::None;
         st.now_playing = None;
-        st.ducked = false;
         Ok(())
     }
 
@@ -284,12 +305,18 @@ impl MusicController {
     /// Set nominal volume and apply it to the active backend.
     pub async fn set_volume(&self, percent: u8) -> Result<()> {
         let v = percent.min(100);
-        {
+        let target = {
             let mut st = self.state.write().await;
             st.volume = v;
-            st.ducked = false;
-        }
-        self.apply_volume(v).await
+            if st.duck_depth > 0 {
+                (v as f32 * db_to_scale(self.duck_db))
+                    .round()
+                    .clamp(0.0, 100.0) as u8
+            } else {
+                v
+            }
+        };
+        self.apply_volume(target).await
     }
 
     async fn nudge_volume(&self, delta: i16) -> Result<u8> {
@@ -315,39 +342,36 @@ impl MusicController {
     // Ducking (spec §7)
     // -----------------------------------------------------------------
 
-    /// Attenuate music while TTS speaks. Idempotent.
+    /// Attenuate music while speech is active. Nested callers are reference-counted.
     pub async fn duck(&self) {
         let (should, target) = {
             let mut st = self.state.write().await;
-            if st.ducked || st.source == Source::None {
+            let first = st.duck_depth == 0;
+            st.duck_depth = st.duck_depth.saturating_add(1);
+            if !first || st.source == Source::None {
                 (false, 0)
             } else {
-                st.ducked = true;
                 let scaled = (st.volume as f32 * db_to_scale(self.duck_db)).round();
                 (true, scaled.clamp(0.0, 100.0) as u8)
             }
         };
-        if should
-            && let Err(e) = self.apply_volume(target).await
-        {
+        if should && let Err(e) = self.apply_volume(target).await {
             tracing::warn!(error = %e, "ducking failed");
         }
     }
 
-    /// Restore volume after TTS. Idempotent.
+    /// Restore volume after the outermost speech scope finishes.
     pub async fn unduck(&self) {
         let (should, target) = {
             let mut st = self.state.write().await;
-            if !st.ducked {
+            if st.duck_depth == 0 {
                 (false, 0)
             } else {
-                st.ducked = false;
-                (true, st.volume)
+                st.duck_depth -= 1;
+                (st.duck_depth == 0 && st.source != Source::None, st.volume)
             }
         };
-        if should
-            && let Err(e) = self.apply_volume(target).await
-        {
+        if should && let Err(e) = self.apply_volume(target).await {
             tracing::warn!(error = %e, "unducking failed");
         }
     }
@@ -355,11 +379,17 @@ impl MusicController {
     pub async fn now_playing(&self) -> Option<String> {
         match self.source().await {
             Source::Spotify => match &self.spotify {
-                Some(sp) => sp.now_playing().await.or(self.state.read().await.now_playing.clone()),
+                Some(sp) => sp
+                    .now_playing()
+                    .await
+                    .or(self.state.read().await.now_playing.clone()),
                 None => None,
             },
             Source::Radio => {
-                self.mpv.now_playing().await.or(self.state.read().await.now_playing.clone())
+                self.mpv
+                    .now_playing()
+                    .await
+                    .or(self.state.read().await.now_playing.clone())
             }
             Source::None => None,
         }
@@ -372,7 +402,11 @@ impl MusicController {
             Source::None => "nothing playing".to_string(),
             other => {
                 let what = self.now_playing().await.unwrap_or_else(|| "unknown".into());
-                let backend = if other == Source::Spotify { "spotify" } else { "radio" };
+                let backend = if other == Source::Spotify {
+                    "spotify"
+                } else {
+                    "radio"
+                };
                 format!("playing \"{what}\" via {backend} at volume {}", st.volume)
             }
         }
@@ -388,7 +422,10 @@ mod tests {
 
     fn controller(duck_db: f32) -> MusicController {
         let mut stations = BTreeMap::new();
-        stations.insert("npr".to_string(), "https://example.invalid/npr.mp3".to_string());
+        stations.insert(
+            "npr".to_string(),
+            "https://example.invalid/npr.mp3".to_string(),
+        );
         MusicController::new(
             MpvClient::new("/nonexistent/hermit-test.sock"),
             None,
@@ -408,28 +445,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ducking_is_idempotent_and_restores_exactly() {
+    async fn nested_ducking_restores_only_after_the_outer_scope() {
         let c = controller(-12.0);
         // Force a source so ducking engages; mpv calls fail harmlessly.
         c.state.write().await.source = Source::Radio;
 
         assert_eq!(c.volume().await, 70);
         c.duck().await;
-        assert!(c.state.read().await.ducked);
-        c.duck().await; // second duck must not compound
-        assert!(c.state.read().await.ducked);
+        assert_eq!(c.state.read().await.duck_depth, 1);
+        c.duck().await; // nested duck must not compound attenuation
+        assert_eq!(c.state.read().await.duck_depth, 2);
         c.unduck().await;
-        assert!(!c.state.read().await.ducked);
-        assert_eq!(c.volume().await, 70, "nominal volume must survive a duck cycle");
-        c.unduck().await; // idempotent
+        assert_eq!(c.state.read().await.duck_depth, 1);
+        c.unduck().await;
+        assert_eq!(c.state.read().await.duck_depth, 0);
+        assert_eq!(
+            c.volume().await,
+            70,
+            "nominal volume must survive a duck cycle"
+        );
+        c.unduck().await; // extra release is harmless
         assert_eq!(c.volume().await, 70);
     }
 
     #[tokio::test]
-    async fn ducking_does_nothing_when_silent() {
+    async fn ducking_tracks_scope_even_when_music_starts_later() {
         let c = controller(-12.0);
         c.duck().await;
-        assert!(!c.state.read().await.ducked, "no source means nothing to duck");
+        assert_eq!(c.state.read().await.duck_depth, 1);
+        c.unduck().await;
+        assert_eq!(c.state.read().await.duck_depth, 0);
     }
 
     #[tokio::test]
@@ -459,7 +504,10 @@ mod tests {
     #[tokio::test]
     async fn pause_when_idle_is_not_an_error() {
         let c = controller(-12.0);
-        assert!(c.pause().await.is_ok(), "pausing silence should be a no-op, not a failure");
+        assert!(
+            c.pause().await.is_ok(),
+            "pausing silence should be a no-op, not a failure"
+        );
     }
 
     #[tokio::test]
@@ -480,7 +528,11 @@ mod tests {
     fn stations_file_parses_and_lowercases_keys() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("stations.toml");
-        std::fs::write(&p, "[stations]\nNPR = \"https://x/npr.mp3\"\n\"BBC World Service\" = \"https://x/bbc\"\n").unwrap();
+        std::fs::write(
+            &p,
+            "[stations]\nNPR = \"https://x/npr.mp3\"\n\"BBC World Service\" = \"https://x/bbc\"\n",
+        )
+        .unwrap();
         let s = MusicController::load_stations(&p);
         assert_eq!(s.get("npr").unwrap(), "https://x/npr.mp3");
         assert!(s.contains_key("bbc world service"));

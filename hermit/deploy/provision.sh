@@ -268,7 +268,8 @@ install_packages() {
     #   sqlite3    : inspecting the daemon's database by hand.
     #   curl       : bring-up latency measurement, health checks.
     #   ca-certificates : TLS to Cerebras/Deepgram/Cartesia/etc.
-    #   zram-tools : compressed swap, see configure_swap().
+    #   zram-tools : compressed swap on images without Raspberry Pi OS' native
+    #                rpi-swap zram generator; see configure_swap().
     #   usbutils   : lsusb, for confirming the Flex enumerated.
     local pkgs=(
         alsa-utils
@@ -277,9 +278,17 @@ install_packages() {
         sqlite3
         curl
         ca-certificates
-        zram-tools
         usbutils
     )
+
+    # Current Raspberry Pi OS images ship rpi-swap, backed by systemd's zram
+    # generator. Installing zram-tools beside it creates two owners for /dev/zram0;
+    # zramswap then fails every boot with EBUSY even though native swap is healthy.
+    if [[ -f /etc/rpi/swap.conf ]] && [[ -x /usr/lib/systemd/system-generators/zram-generator ]]; then
+        log "native rpi-swap zram detected; not installing duplicate zram-tools"
+    else
+        pkgs+=(zram-tools)
+    fi
 
     # Time sync: prefer whatever the image already ships.  systemd-timesyncd is
     # present on Raspberry Pi OS Lite; only fall back to chrony if it is not.
@@ -362,8 +371,14 @@ configure_swap() {
 
     disable_unit_if_present dphys-swapfile.service "SD-card swap file: slow, and it wears the card out"
 
-    # zram-tools reads /etc/default/zramswap.
-    if [[ -d /etc/default ]] && dpkg-query -W -f='${Status}' zram-tools 2>/dev/null | grep -q "ok installed"; then
+    # Raspberry Pi OS Trixie owns /dev/zram0 through rpi-swap + zram-generator.
+    # Never race that with zram-tools: the loser fails boot with EBUSY and leaves
+    # systemd degraded even though the native swap device is already active.
+    if [[ -f /etc/rpi/swap.conf ]] && [[ -x /usr/lib/systemd/system-generators/zram-generator ]]; then
+        disable_unit_if_present zramswap.service "native rpi-swap already owns /dev/zram0"
+        log "using native rpi-swap zram configuration"
+    # Older Bookworm-style images use zram-tools and /etc/default/zramswap.
+    elif [[ -d /etc/default ]] && dpkg-query -W -f='${Status}' zram-tools 2>/dev/null | grep -q "ok installed"; then
         if write_if_changed /etc/default/zramswap \
 "# Managed by HERMIT provision.sh
 # 512 MB of compressed swap held in RAM.  zstd gives the best ratio per CPU

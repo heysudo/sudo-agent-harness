@@ -27,9 +27,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Result of speaking one utterance.
 #[derive(Debug, Clone, Default)]
@@ -39,6 +38,12 @@ pub struct SpeakResult {
     pub samples: usize,
     /// True if playback was cut short by a barge-in.
     pub interrupted: bool,
+}
+
+impl SpeakResult {
+    pub fn completed(&self) -> bool {
+        self.samples > 0 && !self.interrupted
+    }
 }
 
 /// Text handed to the speaker, one chunk at a time from the sentence chunker.
@@ -176,13 +181,11 @@ impl CartesiaTts {
 
     async fn connect(&self) -> Result<WsStream> {
         let url = self.connect_url();
-        let (ws, _resp) = tokio::time::timeout(
-            self.connect_timeout,
-            tokio_tungstenite::connect_async(&url),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("cartesia websocket connect timed out"))?
-        .context("connecting to cartesia websocket")?;
+        let (ws, _resp) =
+            tokio::time::timeout(self.connect_timeout, tokio_tungstenite::connect_async(&url))
+                .await
+                .map_err(|_| anyhow::anyhow!("cartesia websocket connect timed out"))?
+                .context("connecting to cartesia websocket")?;
         tracing::info!("cartesia websocket connected");
         Ok(ws)
     }
@@ -229,11 +232,18 @@ impl CartesiaTts {
 
         let ctx_id = format!(
             "hermit-{}",
-            self.context_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            self.context_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
 
         let result = self
-            .stream_utterance(guard.as_mut().unwrap(), &ctx_id, &mut text_rx, player, generation)
+            .stream_utterance(
+                guard.as_mut().unwrap(),
+                &ctx_id,
+                &mut text_rx,
+                player,
+                generation,
+            )
             .await;
 
         match result {
@@ -278,10 +288,11 @@ impl CartesiaTts {
                     let Some(msg) = msg else { bail!("cartesia closed the connection") };
                     match msg.context("cartesia websocket error")? {
                         Message::Text(t) => {
-                            match self.handle_frame(&t, ctx_id, player, generation, &mut result, started) {
+                            match self.handle_frame(&t, ctx_id, player, generation, &mut result, started).await {
                                 FrameOutcome::Continue => {}
                                 FrameOutcome::Done => break,
                                 FrameOutcome::Stale => { result.interrupted = true; break }
+                                FrameOutcome::Failed => bail!("cartesia returned an error frame"),
                             }
                         }
                         Message::Binary(_) => {} // Cartesia sends JSON only
@@ -319,7 +330,7 @@ impl CartesiaTts {
         Ok(result)
     }
 
-    fn handle_frame(
+    async fn handle_frame(
         &self,
         text: &str,
         ctx_id: &str,
@@ -358,13 +369,16 @@ impl CartesiaTts {
                 if player.is_stale(generation) {
                     return FrameOutcome::Stale;
                 }
-                player.try_play(samples);
-                FrameOutcome::Continue
+                if player.play(samples).await {
+                    FrameOutcome::Continue
+                } else {
+                    FrameOutcome::Failed
+                }
             }
             "done" => FrameOutcome::Done,
             "error" => {
                 tracing::error!(frame = %text, "cartesia error frame");
-                FrameOutcome::Done
+                FrameOutcome::Failed
             }
             _ => FrameOutcome::Continue,
         }
@@ -375,6 +389,7 @@ enum FrameOutcome {
     Continue,
     Done,
     Stale,
+    Failed,
 }
 
 // ---------------------------------------------------------------------------
@@ -423,12 +438,15 @@ impl ElevenLabsTts {
     async fn connect(&self) -> Result<WsStream> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut req = self.connect_url().into_client_request()?;
-        req.headers_mut()
-            .insert("xi-api-key", self.api_key.parse().context("invalid ELEVENLABS_API_KEY")?);
-        let (ws, _) = tokio::time::timeout(self.connect_timeout, tokio_tungstenite::connect_async(req))
-            .await
-            .map_err(|_| anyhow::anyhow!("elevenlabs websocket connect timed out"))?
-            .context("connecting to elevenlabs websocket")?;
+        req.headers_mut().insert(
+            "xi-api-key",
+            self.api_key.parse().context("invalid ELEVENLABS_API_KEY")?,
+        );
+        let (ws, _) =
+            tokio::time::timeout(self.connect_timeout, tokio_tungstenite::connect_async(req))
+                .await
+                .map_err(|_| anyhow::anyhow!("elevenlabs websocket connect timed out"))?
+                .context("connecting to elevenlabs websocket")?;
         tracing::info!("elevenlabs websocket connected");
         Ok(ws)
     }
@@ -494,7 +512,10 @@ impl ElevenLabsTts {
                                         result.ttfa_ms = Some(crate::metrics::ms_since(started));
                                     }
                                     result.samples += samples.len();
-                                    player.try_play(samples);
+                                    if !player.play(samples).await {
+                                        result.interrupted = true;
+                                        break;
+                                    }
                                 }
                             }
                             if v.get("isFinal").and_then(|x| x.as_bool()).unwrap_or(false) {
@@ -545,7 +566,10 @@ pub struct PiperTts {
 
 impl PiperTts {
     pub fn new(cfg: &crate::config::Tts) -> Self {
-        Self { binary: cfg.piper_binary.clone(), voice: cfg.piper_voice.clone() }
+        Self {
+            binary: cfg.piper_binary.clone(),
+            voice: cfg.piper_voice.clone(),
+        }
     }
 
     async fn speak(
@@ -603,7 +627,10 @@ impl PiperTts {
                     result.ttfa_ms = Some(crate::metrics::ms_since(started));
                 }
                 result.samples += samples.len();
-                player.try_play(samples);
+                if !player.play(samples).await {
+                    result.interrupted = true;
+                    break;
+                }
             }
         }
         let _ = child.wait().await;
@@ -654,7 +681,10 @@ mod tests {
         let t = CartesiaTts::new(&c, "key/with+chars".into());
         let u = t.connect_url();
         assert!(u.contains("cartesia_version=2026-08-14"));
-        assert!(u.contains("key%2Fwith%2Bchars"), "credentials must be percent-encoded: {u}");
+        assert!(
+            u.contains("key%2Fwith%2Bchars"),
+            "credentials must be percent-encoded: {u}"
+        );
     }
 
     #[test]
@@ -677,11 +707,9 @@ mod tests {
     #[tokio::test]
     async fn disabled_tts_drains_text_instead_of_deadlocking_the_producer() {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
-        let player = AudioPlayer::spawn_with(
-            Box::new(crate::audio::NullBackend::new(16_000)),
-            16_000,
-        )
-        .unwrap();
+        let player =
+            AudioPlayer::spawn_with(Box::new(crate::audio::NullBackend::new(16_000)), 16_000)
+                .unwrap();
 
         let producer = tokio::spawn(async move {
             for i in 0..20 {
@@ -706,6 +734,9 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.tts.piper_binary = "/definitely/not/here/piper".into();
         let t = Tts::from_config(&cfg);
-        assert!(!t.is_enabled(), "no keys and no piper => text-only, but still boots");
+        assert!(
+            !t.is_enabled(),
+            "no keys and no piper => text-only, but still boots"
+        );
     }
 }

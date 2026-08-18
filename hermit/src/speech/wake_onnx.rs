@@ -117,10 +117,10 @@ impl HeySudo {
             }
         }
 
-        // Two intra-op threads: the reference caps onnxruntime at 1 to protect a
-        // busy Python process, but this daemon's cores are idle while it waits on
-        // the network, and halving the ~200 ms score cost directly improves how
-        // often the stride lets us score.
+        // One intra-op thread keeps the always-on wake detector below one core on the
+        // passively cooled Pi 4. A live two-thread build held 125-130% CPU and reached
+        // 78 C within minutes. One thread still finishes the score inside the 320 ms
+        // stride while leaving thermal headroom for the foreground turn.
         //
         // ort's builder/error types are not Send+Sync, so `?` cannot cross a closure
         // boundary here; each session is built inline. `map_err(anyhow)` converts the
@@ -128,7 +128,7 @@ impl HeySudo {
         let session = |path: &Path, what: &str| -> Result<Session> {
             Session::builder()
                 .map_err(|e| anyhow::anyhow!("ort: {e}"))?
-                .with_intra_threads(2)
+                .with_intra_threads(1)
                 .map_err(|e| anyhow::anyhow!("ort: {e}"))?
                 .commit_from_file(path)
                 .map_err(|e| anyhow::anyhow!("loading {what}: {e}"))

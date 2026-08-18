@@ -17,15 +17,15 @@ user-facing doc. This file is the engineering log.
 |---|---|
 | 0 — hardware bring-up | **PASSED** (enumeration, rates, playback, capture, AEC) |
 | 1 — skeleton + streaming | **PASSED on device** (TTFT 366 ms p50, gate 700) |
-| 2 — tools | Code complete; verified against real gpt-oss-120b. Needs `PARALLEL_API_KEY` / `FIRECRAWL_API_KEY` for live gates |
+| 2 — tools | Code complete; verified against real gpt-oss-120b. Parallel live gate passed on device; Firecrawl still needs a valid key |
 | 3 — voice out | **PASSED on device** — first audio 654 / 875 ms (gate 1200) |
 | 4 — voice in | **PASSED on device** via `/listen` — live speech transcribed, answered, spoken; first audio 983 ms. Wake word = **"Hey Sudo"**, ported and verified against the Python reference; live hands-free trigger not yet caught on tape |
-| 5 — music | Code complete; needs Spotify Premium creds; mpv/librespot sidecars not yet installed |
+| 5 — music | Radio sidecar installed and active; Spotify still needs Premium creds + librespot |
 | 6 — memory | **PASSED** — recall 0.7 ms, cross-session verified with real model |
 | 7 — learning loop | **PASSED** — facts extracted, stored, recalled in a fresh session |
-| 8 — hardening | Not started (watchdog wired, 24 h soak not run) |
+| 8 — hardening | Boot/restart/watchdog verified; native rpi-swap conflict fixed; 24 h soak not run |
 
-195 tests pass with no network and no API keys. `cargo clippy --all-targets` is clean.
+207 tests pass with no network and no API keys. `cargo clippy --all-targets` is clean.
 
 ---
 
@@ -297,16 +297,16 @@ earcons never gate boot. Four spare earcons (`listening`, `ready`,
    affect runtime** — the daemon uses `hermit_in` (ch0), which works and is AEC-verified.
    Fix by testing ttable orders properly, or switch to `dsnoop` `bindings.<client> <slave>`
    which has unambiguous semantics.
-2. **Sidecars not installed.** `librespot` is not in the Debian archive; `provision.sh`
-   prints a manual install path rather than piping a binary to root. `mpv` likewise not
-   yet confirmed installed. Phase 5 needs both.
+2. **Spotify remains optional/incomplete.** `mpv` is installed and active for radio.
+   `librespot` is not in the Debian archive; `provision.sh` prints a manual install path
+   rather than piping a binary to root. Spotify also needs Premium OAuth credentials.
 3. **Never run `speaker-test` without a bound.** It loops forever. An orphaned
    `speaker-test` kept beeping at the user after an SSH timeout. Always use
    `timeout N speaker-test ... -l 1`, and `pkill -9 speaker-test` if in doubt.
 4. **Wi-Fi, not Ethernet.** Latency figures carry Wi-Fi jitter (ping 7–17 ms, previously
    17–113 ms when power was bad).
-5. **Missing keys**: Parallel, Firecrawl (live tool gates), Spotify. Cartesia +
-   Deepgram are installed on the Pi. Cartesia voice: Skylar
+5. **Missing keys**: Firecrawl and Spotify. Parallel is installed and passed a live
+   HTTP 200 search gate. Cartesia + Deepgram are installed on the Pi. Cartesia voice: Skylar
    `db6b0ed5-d5d3-463d-ae85-518a07d3c2b4`. Picovoice is NOT required — see the
    "Hey Sudo" section.
 6. **Live hands-free wake not yet demonstrated.** Every attempt so far captured an

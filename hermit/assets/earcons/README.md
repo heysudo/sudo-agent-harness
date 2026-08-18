@@ -10,7 +10,7 @@ play with zero conversion).
 | `thinking.wav` | end of speech — "stopped listening, working on it" |
 | `listening.wav` | (unwired spare) |
 | `ready.wav` | (unwired spare — boot complete) |
-| `session_close.wav` | (unwired spare) |
+| `session_close.wav` | spoken response has fully played — "turn complete" |
 | `attention.wav` | (unwired spare — proactive speech) |
 
 Loaded from `/opt/hermit/assets/earcons` (override: `HERMIT_ASSET_DIR`).

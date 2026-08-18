@@ -29,9 +29,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub enum AudioMsg {
     /// Signed 16-bit mono PCM at the configured rate, tagged with the generation
     /// it was produced in.
-    Pcm { generation: u64, samples: Vec<i16> },
+    Pcm {
+        generation: u64,
+        samples: Vec<i16>,
+    },
     /// Discard everything buffered, in software and in the driver.
     Flush,
+    /// Wait until queued PCM has reached the device and finished playing.
+    Drain(tokio::sync::oneshot::Sender<()>),
     Stop,
 }
 
@@ -149,9 +154,7 @@ impl AudioPlayer {
                 // when the backend does not block (e.g. the null backend on a dev
                 // machine), so this never becomes a busy-spin.
                 let silence_dur = if sample_rate > 0 {
-                    std::time::Duration::from_secs_f64(
-                        keepalive_frames as f64 / sample_rate as f64,
-                    )
+                    std::time::Duration::from_secs_f64(keepalive_frames as f64 / sample_rate as f64)
                 } else {
                     std::time::Duration::from_millis(20)
                 };
@@ -190,7 +193,10 @@ impl AudioPlayer {
                     };
 
                     match msg {
-                        AudioMsg::Pcm { generation, samples } => {
+                        AudioMsg::Pcm {
+                            generation,
+                            samples,
+                        } => {
                             // Stale audio from before a barge-in: drop it silently.
                             if generation < gen_for_thread.load(Ordering::Acquire) {
                                 continue;
@@ -204,6 +210,12 @@ impl AudioPlayer {
                                 tracing::warn!(error = %e, "audio discard failed");
                             }
                         }
+                        AudioMsg::Drain(done) => {
+                            if let Err(e) = backend.drain() {
+                                tracing::warn!(error = %e, "audio drain failed");
+                            }
+                            let _ = done.send(());
+                        }
                         AudioMsg::Stop => break,
                     }
                 }
@@ -211,7 +223,12 @@ impl AudioPlayer {
                 tracing::debug!("audio thread exiting");
             })?;
 
-        Ok(Self { tx, generation, sample_rate, muted: Arc::new(std::sync::atomic::AtomicBool::new(false)) })
+        Ok(Self {
+            tx,
+            generation,
+            sample_rate,
+            muted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
     }
 
     /// Speaker mute. Audio keeps flowing as silence so capture stays clocked.
@@ -233,7 +250,13 @@ impl AudioPlayer {
             samples.iter_mut().for_each(|s| *s = 0);
         }
         let generation = self.generation.load(Ordering::Acquire);
-        self.tx.send(AudioMsg::Pcm { generation, samples }).await.is_ok()
+        self.tx
+            .send(AudioMsg::Pcm {
+                generation,
+                samples,
+            })
+            .await
+            .is_ok()
     }
 
     /// Queue PCM without awaiting; drops the chunk if the buffer is full.
@@ -245,7 +268,10 @@ impl AudioPlayer {
             samples.iter_mut().for_each(|s| *s = 0);
         }
         let generation = self.generation.load(Ordering::Acquire);
-        match self.tx.try_send(AudioMsg::Pcm { generation, samples }) {
+        match self.tx.try_send(AudioMsg::Pcm {
+            generation,
+            samples,
+        }) {
             Ok(()) => true,
             Err(e) => {
                 tracing::warn!("dropping audio chunk: {e}");
@@ -259,11 +285,22 @@ impl AudioPlayer {
     ///
     /// Ordering matters: bump FIRST so nothing produced before this instant can
     /// still be written after the discard.
-    pub fn flush(&self) {
+    pub async fn flush(&self) -> bool {
         self.generation.fetch_add(1, Ordering::AcqRel);
-        if let Err(e) = self.tx.try_send(AudioMsg::Flush) {
+        if let Err(e) = self.tx.send(AudioMsg::Flush).await {
             tracing::warn!("could not signal audio flush: {e}");
+            return false;
         }
+        true
+    }
+
+    /// Wait until all audio queued before this call has actually played.
+    pub async fn drain(&self) -> bool {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self.tx.send(AudioMsg::Drain(tx)).await.is_err() {
+            return false;
+        }
+        rx.await.is_ok()
     }
 
     /// Current generation — callers can check whether their stream is still current.
@@ -402,7 +439,10 @@ mod tests {
         let written = Arc::new(Mutex::new(Vec::new()));
         let discards = Arc::new(AtomicU64::new(0));
         let p = AudioPlayer::spawn_with(
-            Box::new(RecordingBackend { written: written.clone(), discards: discards.clone() }),
+            Box::new(RecordingBackend {
+                written: written.clone(),
+                discards: discards.clone(),
+            }),
             16_000,
         )
         .unwrap();
@@ -423,22 +463,27 @@ mod tests {
         let written = Arc::new(Mutex::new(Vec::new()));
         let discards = Arc::new(AtomicU64::new(0));
         let p = AudioPlayer::spawn_with(
-            Box::new(RecordingBackend { written: written.clone(), discards: discards.clone() }),
+            Box::new(RecordingBackend {
+                written: written.clone(),
+                discards: discards.clone(),
+            }),
             16_000,
         )
         .unwrap();
 
         let before = p.generation();
         // Capture a generation, then flush, then try to play with the old one.
-        p.flush();
+        assert!(p.flush().await);
         assert!(p.is_stale(before), "generation must advance on flush");
         assert_eq!(p.generation(), before + 1);
 
         // Directly enqueue a stale chunk the way a mid-flight TTS stream would.
-        p.tx
-            .send(AudioMsg::Pcm { generation: before, samples: vec![9, 9, 9] })
-            .await
-            .unwrap();
+        p.tx.send(AudioMsg::Pcm {
+            generation: before,
+            samples: vec![9, 9, 9],
+        })
+        .await
+        .unwrap();
         // And a current one.
         p.play(vec![7]).await;
 
@@ -449,9 +494,15 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         let got = written.lock().unwrap().clone();
-        assert!(!got.contains(&9), "stale audio must never be written: {got:?}");
+        assert!(
+            !got.contains(&9),
+            "stale audio must never be written: {got:?}"
+        );
         assert_eq!(got, vec![7]);
-        assert!(discards.load(Ordering::SeqCst) >= 1, "driver buffer must be dropped too");
+        assert!(
+            discards.load(Ordering::SeqCst) >= 1,
+            "driver buffer must be dropped too"
+        );
     }
 
     #[test]
@@ -475,7 +526,10 @@ mod tests {
         let written = Arc::new(Mutex::new(Vec::new()));
         let discards = Arc::new(AtomicU64::new(0));
         let p = AudioPlayer::spawn_keepalive(
-            Box::new(RecordingBackend { written: written.clone(), discards }),
+            Box::new(RecordingBackend {
+                written: written.clone(),
+                discards,
+            }),
             16_000,
             160, // 10 ms
         )
@@ -483,7 +537,10 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         let n = written.lock().unwrap().len();
-        assert!(n >= 160, "expected keepalive silence while idle, got {n} samples");
+        assert!(
+            n >= 160,
+            "expected keepalive silence while idle, got {n} samples"
+        );
         assert!(
             written.lock().unwrap().iter().all(|&s| s == 0),
             "keepalive must be silence, not noise"
@@ -496,7 +553,10 @@ mod tests {
         let written = Arc::new(Mutex::new(Vec::new()));
         let discards = Arc::new(AtomicU64::new(0));
         let _p = AudioPlayer::spawn_keepalive(
-            Box::new(RecordingBackend { written: written.clone(), discards }),
+            Box::new(RecordingBackend {
+                written: written.clone(),
+                discards,
+            }),
             16_000,
             0,
         )
@@ -510,11 +570,14 @@ mod tests {
         let p = AudioPlayer::spawn_with(Box::new(NullBackend::new(16_000)), 16_000).unwrap();
         let start = std::time::Instant::now();
         for _ in 0..100 {
-            p.flush();
+            assert!(p.flush().await);
         }
         let per = start.elapsed().as_micros() as f64 / 100.0;
         // Flush must be effectively free; the 100ms barge-in budget is dominated by
         // the driver drop, not by this bookkeeping.
-        assert!(per < 2000.0, "flush took {per}us; barge-in budget is 100ms total");
+        assert!(
+            per < 2000.0,
+            "flush took {per}us; barge-in budget is 100ms total"
+        );
     }
 }

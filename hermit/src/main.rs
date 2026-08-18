@@ -24,7 +24,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "hermit", version, about = "Voice agent harness for Raspberry Pi")]
+#[command(
+    name = "hermit",
+    version,
+    about = "Voice agent harness for Raspberry Pi"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -105,8 +109,8 @@ fn init_tracing() {
 
 /// Wire everything up and serve.
 async fn run(config_path: PathBuf) -> Result<()> {
-    let cfg = config::load(&config_path)
-        .with_context(|| format!("loading {}", config_path.display()))?;
+    let cfg =
+        config::load(&config_path).with_context(|| format!("loading {}", config_path.display()))?;
     let cfg = Arc::new(cfg);
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -131,13 +135,22 @@ async fn run(config_path: PathBuf) -> Result<()> {
     ));
 
     let search = http::secret_opt("PARALLEL_API_KEY").map(|k| {
-        Arc::new(tools::search::SearchClient::new(http_client.clone(), &cfg.search, k))
+        Arc::new(tools::search::SearchClient::new(
+            http_client.clone(),
+            &cfg.search,
+            k,
+        ))
     });
     if search.is_none() {
         tracing::warn!("PARALLEL_API_KEY not set; web_search will return an error to the model");
     }
-    let fetch = http::secret_opt("FIRECRAWL_API_KEY")
-        .map(|k| Arc::new(tools::fetch::FetchClient::new(http_client.clone(), &cfg.fetch, k)));
+    let fetch = http::secret_opt("FIRECRAWL_API_KEY").map(|k| {
+        Arc::new(tools::fetch::FetchClient::new(
+            http_client.clone(),
+            &cfg.fetch,
+            k,
+        ))
+    });
 
     // ---- storage + prompt layers -----------------------------------------
     let store = Arc::new(Store::open(&cfg.paths.data_dir)?);
@@ -295,7 +308,11 @@ async fn run(config_path: PathBuf) -> Result<()> {
     tracing::info!("hermit ready");
 
     if cfg.server.cli {
-        hermit::gateway::cli::run(gateway.clone()).await;
+        wait_for_shutdown_with_cli(
+            hermit::gateway::cli::run(gateway.clone()),
+            shutdown_signal(),
+        )
+        .await;
     } else {
         shutdown_signal().await;
     }
@@ -343,8 +360,8 @@ async fn consolidate(config_path: PathBuf) -> Result<()> {
 /// voice pipeline does live.
 fn wake_score(wav: &std::path::Path, config: &std::path::Path) -> Result<()> {
     let cfg = config::load(config)?;
-    let mut reader = std::fs::File::open(wav)
-        .with_context(|| format!("opening {}", wav.display()))?;
+    let mut reader =
+        std::fs::File::open(wav).with_context(|| format!("opening {}", wav.display()))?;
     let mut raw = Vec::new();
     std::io::Read::read_to_end(&mut reader, &mut raw)?;
     anyhow::ensure!(raw.len() > 44, "{} is not a WAV", wav.display());
@@ -353,7 +370,11 @@ fn wake_score(wav: &std::path::Path, config: &std::path::Path) -> Result<()> {
         .chunks_exact(2)
         .map(|b| i16::from_le_bytes([b[0], b[1]]))
         .collect();
-    println!("{} samples ({:.1}s at 16kHz)", pcm.len(), pcm.len() as f32 / 16000.0);
+    println!(
+        "{} samples ({:.1}s at 16kHz)",
+        pcm.len(),
+        pcm.len() as f32 / 16000.0
+    );
 
     let mut detector = hermit::speech::wake::build(&cfg.wake);
     let frame = detector.frame_length();
@@ -366,7 +387,10 @@ fn wake_score(wav: &std::path::Path, config: &std::path::Path) -> Result<()> {
         }
         if detector.process(chunk).is_some() {
             fired += 1;
-            println!("  WAKE at t={:.2}s", (i + 1) as f32 * frame as f32 / 16000.0);
+            println!(
+                "  WAKE at t={:.2}s",
+                (i + 1) as f32 * frame as f32 / 16000.0
+            );
         }
     }
     println!("detections: {fired}");
@@ -433,5 +457,69 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Keep the daemon alive when its optional stdin front end disappears.
+///
+/// systemd connects stdin to `/dev/null`, so EOF is expected immediately. An explicit
+/// `/quit` still stops an interactive bring-up run, while SIGTERM/Ctrl-C always wins.
+async fn wait_for_shutdown_with_cli<C, S>(cli: C, shutdown: S)
+where
+    C: std::future::Future<Output = hermit::gateway::cli::Exit>,
+    S: std::future::Future<Output = ()>,
+{
+    tokio::pin!(cli);
+    tokio::pin!(shutdown);
+    tokio::select! {
+        _ = &mut shutdown => {}
+        exit = &mut cli => match exit {
+            hermit::gateway::cli::Exit::Quit => {}
+            hermit::gateway::cli::Exit::Eof => {
+                tracing::info!("stdin closed; daemon remains active without the CLI front end");
+                (&mut shutdown).await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod daemon_lifecycle_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cli_eof_does_not_shutdown_the_daemon() {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(wait_for_shutdown_with_cli(
+            async { hermit::gateway::cli::Exit::Eof }, // systemd stdin reaches EOF immediately
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !task.is_finished(),
+            "the daemon must keep running after its optional CLI reaches EOF"
+        );
+
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("daemon did not honor shutdown")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_cli_quit_still_stops_an_interactive_daemon() {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_shutdown_with_cli(
+                async { hermit::gateway::cli::Exit::Quit },
+                std::future::pending(),
+            ),
+        )
+        .await
+        .expect("explicit /quit should stop without waiting for a signal");
     }
 }

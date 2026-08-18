@@ -1,8 +1,9 @@
 //! Earcons — the short UI sounds, borrowed from the b2-34 project.
 //!
-//! Two are wired (both b2-34 semantics, both explicit user requests there and here):
+//! Three are wired (Alexa-style lifecycle cues):
 //! - `trigger_ack` plays the instant the wake word fires: "heard you".
 //! - `thinking` plays at end of speech: "stopped listening, working on it".
+//! - `session_close` plays after the spoken answer has been queued: "response complete".
 //!
 //! They are mono s16le 16 kHz WAVs — hermit's native format — so they are decoded
 //! once at boot and enqueued as raw PCM with zero conversion. A missing file logs
@@ -22,6 +23,7 @@ fn asset_dir() -> PathBuf {
 pub struct Earcons {
     trigger_ack: Option<Vec<i16>>,
     thinking: Option<Vec<i16>>,
+    response_complete: Option<Vec<i16>>,
 }
 
 impl Earcons {
@@ -38,10 +40,15 @@ impl Earcons {
                 }
             }
         };
-        let e = Self { trigger_ack: load("trigger_ack"), thinking: load("thinking") };
+        let e = Self {
+            trigger_ack: load("trigger_ack"),
+            thinking: load("thinking"),
+            response_complete: load("session_close"),
+        };
         tracing::info!(
             trigger_ack = e.trigger_ack.is_some(),
             thinking = e.thinking.is_some(),
+            response_complete = e.response_complete.is_some(),
             dir = %dir.display(),
             "earcons loaded"
         );
@@ -50,22 +57,34 @@ impl Earcons {
 
     /// Empty set for tests / dev machines without assets.
     pub fn none() -> Self {
-        Self { trigger_ack: None, thinking: None }
+        Self {
+            trigger_ack: None,
+            thinking: None,
+            response_complete: None,
+        }
     }
 
     /// "Heard the wake word." Play IMMEDIATELY after the barge-in flush — the flush
     /// bumps the player generation, so enqueue after it or the chirp is discarded
     /// as stale.
-    pub fn play_trigger_ack(&self, player: &AudioPlayer) {
+    pub async fn play_trigger_ack(&self, player: &AudioPlayer) {
         if let Some(pcm) = &self.trigger_ack {
-            player.try_play(pcm.clone());
+            player.play(pcm.clone()).await;
         }
     }
 
     /// "Stopped listening; working on it."
-    pub fn play_thinking(&self, player: &AudioPlayer) {
+    pub async fn play_thinking(&self, player: &AudioPlayer) {
         if let Some(pcm) = &self.thinking {
-            player.try_play(pcm.clone());
+            player.play(pcm.clone()).await;
+        }
+    }
+
+    /// "The spoken response is complete." Awaiting the channel send guarantees this
+    /// cue is queued behind every TTS chunk, even when the playback queue is full.
+    pub async fn play_response_complete(&self, player: &AudioPlayer) {
+        if let Some(pcm) = &self.response_complete {
+            player.play(pcm.clone()).await;
         }
     }
 }
@@ -195,27 +214,67 @@ mod tests {
         assert!(load_wav_mono_s16(&dir.path().join("absent.wav")).is_err());
     }
 
-    #[test]
-    fn missing_assets_mean_silence_not_failure() {
+    #[tokio::test]
+    async fn missing_assets_mean_silence_not_failure() {
         let e = Earcons::none();
-        let p = AudioPlayer::spawn_with(
-            Box::new(crate::audio::NullBackend::new(16_000)),
-            16_000,
-        )
-        .unwrap();
-        e.play_trigger_ack(&p); // must not panic or error
-        e.play_thinking(&p);
+        let p = AudioPlayer::spawn_with(Box::new(crate::audio::NullBackend::new(16_000)), 16_000)
+            .unwrap();
+        e.play_trigger_ack(&p).await; // must not panic or error
+        e.play_thinking(&p).await;
     }
 
     #[test]
     fn shipped_earcons_decode() {
         // Guard the actual assets in the repo: format drift breaks the cue silently.
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/earcons");
-        for name in ["trigger_ack", "thinking"] {
+        for name in ["trigger_ack", "thinking", "session_close"] {
             let pcm = load_wav_mono_s16(&dir.join(format!("{name}.wav")))
                 .unwrap_or_else(|e| panic!("{name}.wav failed to decode: {e}"));
             let ms = pcm.len() as f32 / 16.0;
-            assert!(ms > 30.0 && ms < 500.0, "{name} is {ms:.0} ms — expected a short chirp");
+            assert!(
+                ms > 30.0 && ms < 500.0,
+                "{name} is {ms:.0} ms — expected a short chirp"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn response_complete_cue_is_queued_after_spoken_audio() {
+        use std::sync::{Arc, Mutex};
+
+        struct RecordingBackend(Arc<Mutex<Vec<i16>>>);
+        impl crate::audio::Backend for RecordingBackend {
+            fn write(&mut self, samples: &[i16]) -> Result<()> {
+                self.0.lock().unwrap().extend_from_slice(samples);
+                Ok(())
+            }
+            fn discard(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn drain(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let player =
+            AudioPlayer::spawn_with(Box::new(RecordingBackend(written.clone())), 16_000).unwrap();
+        let earcons = Earcons {
+            trigger_ack: None,
+            thinking: None,
+            response_complete: Some(vec![9, 10]),
+        };
+
+        assert!(player.play(vec![1, 2, 3]).await);
+        earcons.play_response_complete(&player).await;
+
+        for _ in 0..50 {
+            if written.lock().unwrap().len() == 5 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(*written.lock().unwrap(), vec![1, 2, 3, 9, 10]);
+        player.stop().await;
     }
 }

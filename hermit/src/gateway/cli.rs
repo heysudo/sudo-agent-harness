@@ -7,22 +7,32 @@ use super::Gateway;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    /// The operator explicitly asked the daemon to stop.
+    Quit,
+    /// stdin disappeared (normal under systemd); only the CLI front end is gone.
+    Eof,
+}
+
 /// Read lines from stdin, answer each, stream tokens to stdout.
-pub async fn run(gateway: Arc<Gateway>) {
+pub async fn run(gateway: Arc<Gateway>) -> Exit {
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
     let mut stdout = tokio::io::stdout();
 
-    let _ = stdout.write_all(b"hermit ready. type a question, /listen to speak, or /quit\n> ").await;
+    let _ = stdout
+        .write_all(b"hermit ready. type a question, /listen to speak, or /quit\n> ")
+        .await;
     let _ = stdout.flush().await;
 
-    loop {
+    let exit = loop {
         let line = match lines.next_line().await {
             Ok(Some(l)) => l,
-            Ok(None) => break, // EOF
+            Ok(None) => break Exit::Eof,
             Err(e) => {
                 tracing::warn!(error = %e, "stdin read failed");
-                break;
+                break Exit::Eof;
             }
         };
 
@@ -33,7 +43,7 @@ pub async fn run(gateway: Arc<Gateway>) {
             continue;
         }
         if matches!(input, "/quit" | "/exit") {
-            break;
+            break Exit::Quit;
         }
         // Start a voice turn without the wake word. Useful when no Picovoice key is
         // configured, and for testing the microphone path on demand.
@@ -72,7 +82,8 @@ pub async fn run(gateway: Arc<Gateway>) {
 
         let _ = stdout.write_all(b"\n> ").await;
         let _ = stdout.flush().await;
-    }
+    };
 
-    tracing::info!("cli front end closed");
+    tracing::info!(?exit, "cli front end closed");
+    exit
 }

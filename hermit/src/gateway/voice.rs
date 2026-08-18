@@ -28,7 +28,11 @@ fn frame_dbfs(samples: &[i16]) -> f32 {
     }
     let sum_sq: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
     let rms = (sum_sq / samples.len() as f64).sqrt() / 32768.0;
-    if rms <= 0.0 { -99.0 } else { (20.0 * rms.log10()) as f32 }
+    if rms <= 0.0 {
+        -99.0
+    } else {
+        (20.0 * rms.log10()) as f32
+    }
 }
 
 /// Audio captured from the microphone, handed to the async side.
@@ -132,18 +136,15 @@ pub async fn run(
         let wake_at = std::time::Instant::now();
 
         // Barge-in: kill anything currently being spoken, immediately.
-        gateway.player.flush();
+        gateway.player.flush().await;
         // Instant "heard you" chirp — AFTER the flush, which bumps the player
         // generation; enqueued before it, the chirp itself would be discarded
         // as stale audio.
-        earcons.play_trigger_ack(&gateway.player);
+        earcons.play_trigger_ack(&gateway.player).await;
         gateway.music.duck().await;
 
         listening.store(true, Ordering::Release);
-        tracing::info!(
-            flush_us = wake_at.elapsed().as_micros(),
-            "listening"
-        );
+        tracing::info!(flush_us = wake_at.elapsed().as_micros(), "listening");
 
         let gw = gateway.clone();
         let dg = deepgram.clone();
@@ -172,11 +173,7 @@ pub async fn run(
 
 /// Pump microphone audio into the utterance channel until the turn releases the
 /// listening flag or the channel closes.
-async fn forward_until_done(
-    mic_rx: &mut MicRx,
-    utt_tx: MicTx,
-    listening: &AtomicBool,
-) {
+async fn forward_until_done(mic_rx: &mut MicRx, utt_tx: MicTx, listening: &AtomicBool) {
     while listening.load(Ordering::Acquire) {
         match tokio::time::timeout(Duration::from_millis(100), mic_rx.recv()).await {
             Ok(Some(samples)) => {
@@ -196,7 +193,7 @@ async fn forward_until_done(
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
-            Ok(None) => break, // capture ended
+            Ok(None) => break,  // capture ended
             Err(_) => continue, // timeout: re-check the flag
         }
     }
@@ -290,7 +287,7 @@ async fn transcribe_and_answer(
     // "Stopped listening, working on it" — the mic-stop acknowledgement. Played
     // the moment the utterance is finalized, before the LLM round trip starts, so
     // the silence while the answer streams is never mistaken for a missed command.
-    earcons.play_thinking(&gateway.player);
+    earcons.play_thinking(&gateway.player).await;
 
     tracing::info!(
         utterance = %utterance,
@@ -299,7 +296,15 @@ async fn transcribe_and_answer(
     );
 
     match gateway.handle(&utterance, true, None, prefetch).await {
-        Ok(r) => Some(r.answer),
+        Ok(r) => {
+            if r.speech_completed {
+                // Every response sample has already played. Queue and drain the final
+                // cue before releasing the outer music duck.
+                earcons.play_response_complete(&gateway.player).await;
+                gateway.player.drain().await;
+            }
+            Some(r.answer)
+        }
         Err(e) => {
             tracing::error!(error = ?e, "voice turn failed");
             None
@@ -343,7 +348,10 @@ pub fn spawn_capture(cfg: &crate::config::Audio) -> anyhow::Result<MicRx> {
                             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                                 dropped += 1;
                                 if dropped.is_power_of_two() {
-                                    tracing::warn!(dropped, "mic consumer lagging; dropping capture chunks");
+                                    tracing::warn!(
+                                        dropped,
+                                        "mic consumer lagging; dropping capture chunks"
+                                    );
                                 }
                             }
                             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
