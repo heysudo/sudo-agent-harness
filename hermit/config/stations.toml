@@ -1,0 +1,11 @@
+# Named internet-radio stations. "play npr" and "play bbc world service" resolve
+# here on the fast path, with no LLM call.
+#
+# Keys are matched case-insensitively.
+
+[stations]
+npr = "https://npr-ice.streamguys1.com/live.mp3"
+"bbc world service" = "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service"
+"jazz24" = "https://live.wostreaming.net/direct/ppm-jazz24aac256-ibc1"
+"classical" = "https://live.wostreaming.net/direct/wrti-classicalmp3-ibc1"
+"soma groove" = "https://ice1.somafm.com/groovesalad-256-mp3"

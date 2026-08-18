@@ -1,0 +1,179 @@
+##############################################################################
+# HERMIT — the voice agent daemon.
+#
+# Installed by provision.sh to /etc/systemd/system/hermit.service
+#
+#   systemctl start hermit
+#   systemctl status hermit
+#   journalctl -u hermit -f
+#
+# After editing this file in the repo, re-run provision.sh (or copy it over
+# and `systemctl daemon-reload`).
+##############################################################################
+
+[Unit]
+Description=HERMIT ultra-low-latency voice agent daemon
+Documentation=file:/opt/hermit/config/hermit.toml
+
+# network-online.target, not just network.target: the daemon opens TLS
+# connections to Cerebras / Deepgram / Cartesia during startup, and a
+# half-configured interface means a DNS failure on the first request.
+After=network-online.target sound.target
+Wants=network-online.target
+
+# sound.target is reached once ALSA is set up; the Flex is a USB device, so it
+# may still arrive a moment later. The daemon retries its ALSA open rather than
+# dying, but ordering after sound.target avoids the common case of a restart.
+After=hermit-cpu-governor.service
+
+# Restart budget. Restart=always would otherwise let a genuinely broken build
+# spin forever; 5 failures inside 60s means the daemon stays down and
+# `systemctl status` shows why, instead of hiding it in a restart loop.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+# Type=notify: the daemon calls sd_notify(READY=1) once the wake-word engine is
+# loaded, the audio device is open and the config has validated. Until then
+# systemd holds dependent units back rather than declaring success early.
+Type=notify
+NotifyAccess=main
+
+# Hardware watchdog for the process. The daemon sends WATCHDOG=1 on a timer at
+# roughly WatchdogSec/3 (10s). Miss three in a row — a deadlocked tokio worker,
+# a blocked ALSA write, an audio thread stuck on a dead USB device — and systemd
+# kills and restarts it. This is the main defence for an unattended headless box
+# that nobody is watching: a wedged voice assistant is indistinguishable from a
+# powered-off one, and only one of those recovers by itself.
+WatchdogSec=30
+
+Restart=always
+RestartSec=2
+
+User=hermit
+Group=hermit
+# Membership of `audio` is what grants access to /dev/snd. Without it every
+# snd_pcm_open() returns EACCES and the daemon cannot hear or speak.
+SupplementaryGroups=audio
+
+# Secrets. Read by systemd as root before dropping privileges, so the file can
+# be (and is) 0600 hermit:hermit. Never put these in the config file or the repo.
+EnvironmentFile=/etc/hermit/hermit.env
+
+# Sane logging defaults; override per-deployment in hermit.env if needed.
+Environment=RUST_LOG=info
+Environment=RUST_BACKTRACE=1
+
+WorkingDirectory=/opt/hermit
+ExecStart=/opt/hermit/bin/hermit run --config /opt/hermit/config/hermit.toml
+
+# SIGTERM lets the daemon flush SQLite, finish the in-flight TTS sentence and
+# close the ALSA device cleanly. 15s is generous; it should take well under 1s.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# ---------------------------------------------------------------------------
+# Directories.
+#
+#   RuntimeDirectory  -> /run/hermit  (0770 hermit:hermit) — mpv IPC socket.
+#     Preserve=yes because hermit-mpv.service declares the same directory;
+#     without it, stopping either unit would delete the socket the other is
+#     using.
+#   StateDirectory    -> /var/lib/hermit — SQLite database and runtime state.
+# ---------------------------------------------------------------------------
+RuntimeDirectory=hermit
+RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=yes
+StateDirectory=hermit
+StateDirectoryMode=0750
+
+# ---------------------------------------------------------------------------
+# Resource limits, sized for a 1 GB Pi 4.
+#
+# The whole machine has ~1 GB, of which the GPU split and the OS take a slice.
+# The daemon's real working set is the wake-word model, the audio rings and the
+# SQLite page cache — well under 200 MB in normal operation.
+#
+#   MemoryHigh=320M  soft: past this the kernel throttles the cgroup and
+#                    reclaims aggressively. A slow daemon is recoverable.
+#   MemoryMax=448M   hard: past this the cgroup OOM-kills the daemon and
+#                    systemd restarts it. A leak takes down the daemon only,
+#                    NOT sshd — which is the entire point of setting it.
+#                    Leaves room for mpv (128M) + librespot (128M) + OS.
+#   OOMScoreAdjust   negative so that if the SYSTEM as a whole runs out of
+#                    memory, the kernel prefers to kill something else first.
+#                    The daemon is the reason this device exists.
+# ---------------------------------------------------------------------------
+MemoryHigh=320M
+MemoryMax=448M
+OOMScoreAdjust=-500
+
+# Audio work wants to be scheduled promptly. Not real-time priority — the
+# XVF3800 does the hard DSP and the Pi is just moving buffers — but a nudge
+# above the default helps the capture thread meet its period deadline when
+# librespot is decoding.
+Nice=-5
+LimitRTPRIO=20
+LimitMEMLOCK=64M
+LimitNOFILE=8192
+
+# ---------------------------------------------------------------------------
+# Hardening.
+#
+# READ THIS BEFORE TIGHTENING FURTHER: the daemon MUST be able to open ALSA
+# devices under /dev/snd. Two settings people habitually add will silently
+# break audio here:
+#
+#   PrivateDevices=yes   — gives the unit a private /dev with only null, zero,
+#                          full, random, urandom, tty. /dev/snd DISAPPEARS.
+#                          It is therefore explicitly set to no below.
+#   DeviceAllow (unset)  — with DevicePolicy=closed and no DeviceAllow for
+#                          sound, every ALSA open fails with EPERM.
+#
+# So: PrivateDevices=no, DevicePolicy=closed (which already permits null/zero/
+# full/random/urandom/tty), plus one explicit allow for the ALSA device class.
+# That is the minimum that works.
+# ---------------------------------------------------------------------------
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+
+# ProtectSystem=strict makes the ENTIRE filesystem hierarchy read-only,
+# including /etc and /opt. The daemon reads its config and binary from
+# /opt/hermit (read-only is correct — it must not be able to rewrite its own
+# prompts or replace its own binary) and writes only to these two paths.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hermit /run/hermit
+
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=no
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# AF_UNIX  : the mpv IPC socket and sd_notify.
+# AF_INET/6: every API call and the audio websockets.
+# AF_NETLINK: glibc's getaddrinfo enumerates interfaces over netlink; without
+#             it DNS resolution fails in confusing, intermittent ways.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# NOT set: MemoryDenyWriteExecute. The Porcupine wake-word library is a native
+# blob and some releases map executable pages at load; denying W^X here trades
+# a marginal hardening win for a daemon that will not start.
+
+[Install]
+WantedBy=multi-user.target

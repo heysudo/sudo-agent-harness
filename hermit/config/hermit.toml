@@ -1,0 +1,125 @@
+# HERMIT configuration.
+#
+# Everything here is hot-reloaded: the daemon watches this directory and swaps the
+# new config in on write. No rebuild, no restart. A broken edit is logged and the
+# previous config stays live.
+#
+# Secrets are NOT here. They come from /etc/hermit/hermit.env (see .env.example).
+
+[server]
+ws_bind = "127.0.0.1:8765"   # loopback only; text clients connect here
+cli = true                   # read turns from stdin (used by scripts/bench.sh)
+
+[paths]
+data_dir = "/var/lib/hermit"        # SQLite + the learned core.md
+config_dir = "/opt/hermit/config"   # this tree
+ack_dir = "/dev/shm/hermit-acks"    # tmpfs; pre-synthesized acknowledgments
+
+[llm]
+base_url = "https://api.cerebras.ai/v1"
+model = "gpt-oss-120b"
+reasoning_effort_default = "low"      # everything interactive
+reasoning_effort_research = "medium"  # research-classified queries only
+max_tokens = 1024
+temperature = 0.6
+max_tool_rounds = 2                   # HARD CAP; more becomes background_research
+request_timeout_ms = 30000
+
+[search]
+base_url = "https://api.parallel.ai"
+# MUST stay "turbo". The API defaults to "advanced" (~3s) when mode is unset;
+# turbo is ~200ms. config::validate refuses to start if this is changed.
+mode = "turbo"
+fallback_mode = "basic"   # turbo is English+Japanese only
+max_results = 5
+timeout_ms = 4000
+
+[fetch]
+base_url = "https://api.firecrawl.dev"
+timeout_ms = 15000
+max_tokens = 4000         # hard cap on page text handed to the model
+
+[news]
+items_per_feed = 6
+target_words = [150, 250]
+timeout_ms = 5000
+
+[[news.feeds]]
+name = "BBC"
+url = "https://feeds.bbci.co.uk/news/world/rss.xml"
+
+[[news.feeds]]
+name = "NPR"
+url = "https://feeds.npr.org/1001/rss.xml"
+
+[[news.feeds]]
+name = "Reuters"
+url = "https://www.reutersagency.com/feed/?best-topics=top-news&post_type=best"
+
+[music]
+mpv_socket = "/run/hermit/mpv.sock"
+librespot_device_name = "Hermit"
+spotify_api_base = "https://api.spotify.com/v1"
+stations_file = "stations.toml"
+default_volume = 70
+
+[tts]
+provider = "cartesia"                 # "cartesia" | "elevenlabs" | "piper"
+cartesia_url = "wss://api.cartesia.ai/tts/websocket"
+cartesia_model = "sonic-3"
+cartesia_voice_id = ""                # REQUIRED: paste a voice id from Cartesia
+cartesia_version = "2026-08-14"
+# The provider default is 3000ms, which alone exceeds the 1.2s first-audio gate.
+# Validation refuses any value but 0.
+cartesia_max_buffer_delay_ms = 0
+elevenlabs_url = "wss://api.elevenlabs.io/v1/text-to-speech"
+elevenlabs_model = "eleven_flash_v2_5"
+elevenlabs_voice_id = ""
+# Set from Phase 0: the card's NATIVE playback rate. Matching it means zero
+# resampling on the Pi.
+sample_rate = 16000
+piper_binary = "/usr/local/bin/piper"
+piper_voice = "/opt/hermit/config/voices/en_US-lessac-low.onnx"
+connect_timeout_ms = 3000
+
+[stt]
+url = "wss://api.deepgram.com/v1/listen"
+model = "nova-3"
+language = "en-US"
+endpointing_ms = 300
+sample_rate = 16000
+max_utterance_ms = 20000
+
+[wake]
+enabled = true
+keyword = "computer"     # needs /opt/hermit/lib/keywords/computer_raspberry-pi.ppn
+# keyword_path = "/opt/hermit/lib/keywords/custom.ppn"
+sensitivity = 0.6
+
+[audio]
+playback_pcm = "hermit_out"   # defined in /etc/asound.conf
+capture_pcm = "hermit_in"     # XVF3800 processed voice channel
+sample_rate = 16000
+buffer_ms = 200               # small: barge-in flushes what the driver holds
+period_ms = 20
+duck_db = -12.0               # music attenuation while speaking
+
+[memory]
+core_token_cap = 600          # hard cap on core.md
+recall_facts = 5
+recall_skills = 2
+importance_decay = 0.98       # applied nightly
+prune_below = 0.15
+history_turns = 12
+dedupe_similarity = 0.8       # token containment above which a fact is a duplicate
+
+[reflect]
+enabled = true
+turns_per_nudge = 6
+idle_secs = 60
+skill_creation = true
+
+[research]
+max_rounds = 8                # off the hot path
+timeout_secs = 300
+speak_on_complete = true

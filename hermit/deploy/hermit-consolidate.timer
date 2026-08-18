@@ -1,0 +1,43 @@
+##############################################################################
+# HERMIT — timer for the nightly memory consolidation pass.
+#
+#   systemctl enable --now hermit-consolidate.timer
+#   systemctl list-timers hermit-consolidate.timer   # when does it next fire?
+#
+# provision.sh enables this. Enable the TIMER, never the service.
+##############################################################################
+
+[Unit]
+Description=HERMIT nightly memory consolidation (04:00 local)
+Documentation=file:/etc/systemd/system/hermit-consolidate.service
+
+[Timer]
+# 04:00 LOCAL time, every day. systemd uses the system timezone here, so make
+# sure it is right:  timedatectl set-timezone Europe/London
+# 04:00 is chosen because it is after the household is asleep and before any
+# morning briefing would want yesterday already consolidated.
+OnCalendar=*-*-* 04:00:00
+
+# Spread the LLM calls over a few minutes. Three reasons: it stops a fleet of
+# these devices hitting the provider on the same second, it keeps the 04:00
+# wake-up from colliding with every other cron-shaped job on the box, and it
+# applies to the Persistent= catch-up below too — so a run triggered by boot
+# gets up to five minutes for the network, NTP and the daemon to settle rather
+# than firing the instant the timer unit starts.
+RandomizedDelaySec=300
+
+# If the Pi was powered off (or the network was down) at 04:00, run the pass
+# once shortly after the next boot rather than silently skipping a day.
+# systemd stores the last-run timestamp under /var/lib/systemd/timers, so this
+# fires at most once per missed window, not once per boot.
+#
+# Note: there is deliberately no OnBootSec= here. Adding one would make the
+# consolidation pass run after EVERY boot, not just after a missed 04:00.
+Persistent=true
+
+# Runs hermit-consolidate.service (implied by the unit name; stated for the
+# benefit of whoever reads this at 1am).
+Unit=hermit-consolidate.service
+
+[Install]
+WantedBy=timers.target

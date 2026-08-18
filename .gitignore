@@ -1,0 +1,17 @@
+# Rust
+/hermit/target/
+**/*.rs.bk
+
+# Secrets — never commit a filled-in env file
+.env
+*.env
+!hermit/.env.example
+
+# Runtime state
+*.db
+*.db-wal
+*.db-shm
+/hermit/config/core.md.tmp
+
+# OS
+.DS_Store

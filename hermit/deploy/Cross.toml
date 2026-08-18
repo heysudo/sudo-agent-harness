@@ -1,0 +1,146 @@
+##############################################################################
+# HERMIT — cross-compilation configuration for `cross`.
+#
+# This file belongs at the CARGO WORKSPACE ROOT next to Cargo.toml when you
+# build. It lives in deploy/ so that all the deployment artifacts sit together;
+# either symlink or copy it up one level:
+#
+#     cd hermit
+#     ln -sf deploy/Cross.toml Cross.toml
+#
+# (`cross` looks for Cross.toml next to Cargo.toml, or at the path in
+# $CROSS_CONFIG. `CROSS_CONFIG=deploy/Cross.toml cross build ...` also works
+# and avoids the symlink entirely.)
+#
+# WHY CROSS AT ALL:
+#   The Pi 4 has 1 GB of RAM and an SD card. A release build of this crate
+#   graph — LTO=fat, codegen-units=1, rusqlite bundled (which compiles the
+#   whole SQLite amalgamation in C) — will either take most of an hour or run
+#   the box out of memory and get OOM-killed halfway. It also burns SD write
+#   cycles for nothing. So: NEVER compile on the Pi. Build here, copy the
+#   binary over. There is no Rust toolchain on the target and there should
+#   never be one.
+#
+# WHAT YOU RUN:
+#   rustup target add aarch64-unknown-linux-gnu     # once
+#   cargo install cross --git https://github.com/cross-rs/cross  # once
+#   cross build --release --target aarch64-unknown-linux-gnu --features pi
+#
+#   Output: target/aarch64-unknown-linux-gnu/release/hermit
+#
+#   `--features pi` is REQUIRED for the real device build. It turns on
+#   alsa-audio, wake-porcupine and systemd (sd_notify). Without it you get a
+#   binary that compiles fine and then does nothing useful on the Pi: no audio,
+#   no wake word, and — because Type=notify never gets READY=1 — a unit that
+#   systemd kills at the start timeout.
+#
+# REQUIREMENTS ON THE DEV MACHINE:
+#   Docker (or Podman, via CROSS_CONTAINER_ENGINE=podman). cross runs the whole
+#   build inside the container below, so no aarch64 toolchain, no ALSA headers
+#   and no cross-linker need to exist on your host.
+##############################################################################
+
+
+[build]
+# Default target so a bare `cross build --release --features pi` does the right
+# thing. Explicit --target on the command line still wins.
+default-target = "aarch64-unknown-linux-gnu"
+
+
+[build.env]
+# Host environment variables forwarded INTO the build container. cross runs an
+# isolated container, so anything not listed here is invisible to the build.
+#
+#   PKG_CONFIG_ALLOW_CROSS — the alsa-sys build script calls pkg-config, and
+#       pkg-config refuses to answer queries when host arch != target arch
+#       unless this is set to 1. This is the single most common cause of
+#       "could not find system library 'alsa'" when cross-compiling this crate.
+#       Export it on the host before building:
+#           export PKG_CONFIG_ALLOW_CROSS=1
+#   PKG_CONFIG_PATH — only needed if you have to point pkg-config somewhere
+#       other than the multiarch default; normally leave it unset on the host
+#       and the container's own default is used.
+#   CARGO_TERM_COLOR / RUST_BACKTRACE — quality of life.
+#   SOURCE_DATE_EPOCH — set it if you want reproducible builds.
+passthrough = [
+    "PKG_CONFIG_ALLOW_CROSS",
+    "PKG_CONFIG_PATH",
+    "CARGO_TERM_COLOR",
+    "RUST_BACKTRACE",
+    "SOURCE_DATE_EPOCH",
+]
+
+
+[target.aarch64-unknown-linux-gnu]
+# The stock cross image for this target: an x86_64 Debian/Ubuntu userland with
+# the aarch64-linux-gnu GCC toolchain, the correct Rust linker configuration
+# and qemu-aarch64 for running tests. Pinned to an explicit tag rather than
+# :main so a build that worked last month still works today — bump it
+# deliberately, not by accident.
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
+
+# Commands run once when cross prepares the build image; the result is cached
+# as a layer, so this cost is paid on the first build and then not again.
+#
+#   1. $CROSS_DEB_ARCH is set by cross to the Debian architecture name of the
+#      target — "arm64" here. Using the variable rather than hardcoding it is
+#      what cross's own documentation prescribes and keeps this block valid if
+#      the file is ever reused for another target.
+#
+#   2. libasound2-dev:arm64 — the ALSA headers AND the arm64 libasound.so that
+#      the linker needs. The `alsa` crate (feature `alsa-audio`) binds to it
+#      via alsa-sys, which is a pkg-config + bindgen style build. The :arm64
+#      suffix matters: the x86_64 libasound2-dev that may already be in the
+#      image will satisfy the #include and then fail at link time with
+#      "skipping incompatible /usr/lib/x86_64-linux-gnu/libasound.so".
+#
+#   3. pkg-config — how alsa-sys locates the above. The cross images do not all
+#      ship it, and its absence produces a build error that reads like a
+#      missing library rather than a missing tool.
+#
+#   4. The rusqlite "bundled" feature compiles SQLite from C source. The cross
+#      image's aarch64 GCC handles that with no extra packages, which is why
+#      there is no build-essential line here.
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update",
+    "apt-get install --assume-yes --no-install-recommends pkg-config libasound2-dev:$CROSS_DEB_ARCH",
+]
+
+
+[target.aarch64-unknown-linux-gnu.env]
+# Per-target passthrough, merged with [build.env] above. Kept separate so that
+# if a second target is ever added it does not inherit ALSA-specific settings.
+passthrough = [
+    "PKG_CONFIG_ALLOW_CROSS",
+]
+
+# Extra volumes to mount into the container, if you ever need them (for
+# example a local checkout of a patched dependency referenced by a path
+# dependency in Cargo.toml — cross only mounts the workspace by default).
+# volumes = ["EXTRA_SRC"]
+
+
+##############################################################################
+# NOTES ON THE RESULTING BINARY
+#
+# It is one file, but it is NOT statically linked: the gnu target links
+# dynamically against glibc and libasound. That is deliberate and correct here
+# — ALSA plugins (dmix, dsnoop, softvol, route, plug — i.e. every stage of
+# /etc/asound.conf) are dlopen'd shared objects, so a fully static build would
+# come up with none of them and be unable to open any of the PCMs the daemon
+# expects. Both runtime dependencies are already on Raspberry Pi OS Lite, and
+# provision.sh installs alsa-utils which pulls in libasound2 explicitly.
+#
+# Check what it actually needs, on the Pi:
+#     ldd /opt/hermit/bin/hermit
+#     file /opt/hermit/bin/hermit    # -> ELF 64-bit LSB, ARM aarch64
+#
+# TLS is rustls (see Cargo.toml), so there is NO OpenSSL dependency to
+# cross-compile and no libssl-dev line above. Do not add one.
+#
+# The Porcupine wake-word engine ships a native shared library. The `porcupine`
+# crate resolves it at RUNTIME, so it is not baked into the binary: the .so,
+# the model (.pv) and the keyword (.ppn) files must be copied to the Pi
+# alongside the binary. See deploy/README.md.
+##############################################################################

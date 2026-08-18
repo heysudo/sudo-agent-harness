@@ -1,0 +1,102 @@
+##############################################################################
+# HERMIT — nightly memory consolidation.
+#
+# One-shot. Invokes the SAME binary with the `consolidate` subcommand, which
+# walks the day's conversation log in SQLite, summarises and promotes what is
+# worth keeping into long-term memory, and prunes the rest. It exits when done.
+#
+# Triggered by hermit-consolidate.timer (04:00 local). Never enable this
+# service directly — enable the timer.
+#
+#   systemctl start hermit-consolidate     # run it now, by hand
+#   journalctl -u hermit-consolidate -n 50 # see what last night's run did
+##############################################################################
+
+[Unit]
+Description=HERMIT nightly memory consolidation
+Documentation=file:/opt/hermit/config/hermit.toml
+
+# It talks to the LLM provider, so it needs the network up.
+After=network-online.target
+Wants=network-online.target
+
+# Pointless (and noisy) to run if the daemon was never installed.
+ConditionPathExists=/opt/hermit/bin/hermit
+
+[Service]
+Type=oneshot
+
+User=hermit
+Group=hermit
+# Not strictly needed — consolidation touches no audio device — but it keeps
+# the two units' execution contexts identical, which makes "works when I run
+# it by hand, fails from the timer" bugs one class rarer.
+SupplementaryGroups=audio
+
+# Same secrets as the daemon: consolidation calls the LLM to summarise.
+EnvironmentFile=/etc/hermit/hermit.env
+Environment=RUST_LOG=info
+Environment=RUST_BACKTRACE=1
+
+WorkingDirectory=/opt/hermit
+ExecStart=/opt/hermit/bin/hermit consolidate --config /opt/hermit/config/hermit.toml
+
+# A consolidation pass is minutes of LLM calls at worst. If it has not finished
+# in 30 minutes something is wrong (a provider hanging, a runaway loop) and it
+# must not still be running when the household wakes up.
+TimeoutStartSec=30min
+
+# Do not restart on failure: a failed run is logged and simply retried tomorrow.
+# Hammering the provider at 04:00 because of a transient 503 helps nobody.
+Restart=no
+
+# Same directories as the daemon. It writes to the same SQLite database, so it
+# needs the same read-write path. It runs at 04:00 while the daemon is up, so
+# both processes have the database open at once — the daemon side is expected
+# to use WAL mode with a busy timeout.
+RuntimeDirectory=hermit
+RuntimeDirectoryPreserve=yes
+StateDirectory=hermit
+StateDirectoryMode=0750
+
+# Batch work at 04:00 must not make the box unresponsive if anyone is awake
+# and talking to it. Deprioritise it against the daemon on both CPU and IO.
+Nice=10
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+
+# Memory: summarisation streams, so the ceiling is modest. Positive OOM score
+# means that under system-wide pressure the kernel kills THIS, not the daemon.
+MemoryMax=256M
+OOMScoreAdjust=500
+
+# ---------------------------------------------------------------------------
+# Hardening — same reasoning as hermit.service. /dev/snd access is kept even
+# though this path does not use it, purely so the two contexts match.
+# ---------------------------------------------------------------------------
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hermit /run/hermit
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# No [Install] section on purpose: this unit is started by the timer, and
+# enabling it directly would run it at every boot.
