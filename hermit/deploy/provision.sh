@@ -1009,6 +1009,7 @@ Type=simple
 User=${HERMIT_USER}
 Group=${HERMIT_GROUP}
 SupplementaryGroups=audio
+UMask=0077
 
 # --backend alsa --device default puts Spotify audio through the same dmix
 # chain as everything else, which is what keeps the hardware AEC valid while
