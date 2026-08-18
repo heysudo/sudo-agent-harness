@@ -14,6 +14,7 @@
 //! the sentence to finish.
 
 use super::Gateway;
+use crate::speech::earcons::Earcons;
 use crate::speech::stt::{Deepgram, SttEvent, TranscriptBuilder};
 use crate::speech::wake::{FrameFeeder, WakeDetector};
 use std::sync::Arc;
@@ -68,6 +69,8 @@ pub async fn run(
     let listening = Arc::new(AtomicBool::new(false));
     // Console telemetry + control (sudo-console). All throttled internally.
     let mut state = crate::state_io::StateWriter::new();
+    // UI sounds (b2-34 earcons): instant wake ack + end-of-speech "working on it".
+    let earcons = Arc::new(Earcons::load());
 
     tracing::info!("voice pipeline ready; waiting for the wake word");
 
@@ -130,6 +133,10 @@ pub async fn run(
 
         // Barge-in: kill anything currently being spoken, immediately.
         gateway.player.flush();
+        // Instant "heard you" chirp — AFTER the flush, which bumps the player
+        // generation; enqueued before it, the chirp itself would be discarded
+        // as stale audio.
+        earcons.play_trigger_ack(&gateway.player);
         gateway.music.duck().await;
 
         listening.store(true, Ordering::Release);
@@ -141,6 +148,7 @@ pub async fn run(
         let gw = gateway.clone();
         let dg = deepgram.clone();
         let flag = listening.clone();
+        let ec = earcons.clone();
         // 128 x 20 ms = ~2.5 s of audio, comfortably covering the Deepgram
         // handshake so early speech is not lost while the socket opens.
         let (utt_tx, utt_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(128);
@@ -148,7 +156,7 @@ pub async fn run(
         // The utterance task owns STT and the turn; the capture loop keeps feeding
         // it audio until it signals completion.
         let handle = tokio::spawn(async move {
-            let result = transcribe_and_answer(gw.clone(), dg, utt_rx, wake_at).await;
+            let result = transcribe_and_answer(gw.clone(), dg, utt_rx, wake_at, ec).await;
             gw.music.unduck().await;
             flag.store(false, Ordering::Release);
             result
@@ -201,6 +209,7 @@ async fn transcribe_and_answer(
     deepgram: Arc<Deepgram>,
     mut mic_rx: MicRx,
     wake_at: std::time::Instant,
+    earcons: Arc<Earcons>,
 ) -> Option<String> {
     let (audio_tx, mut events) = match deepgram.start().await {
         Ok(x) => x,
@@ -277,6 +286,11 @@ async fn transcribe_and_answer(
         }
         keep
     });
+
+    // "Stopped listening, working on it" — the mic-stop acknowledgement. Played
+    // the moment the utterance is finalized, before the LLM round trip starts, so
+    // the silence while the answer streams is never mistaken for a missed command.
+    earcons.play_thinking(&gateway.player);
 
     tracing::info!(
         utterance = %utterance,

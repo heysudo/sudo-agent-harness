@@ -49,6 +49,7 @@ $RSYNC config/           "$HOST:~/hermit-deploy/config/"
 $RSYNC firmware/         "$HOST:~/respeaker-fw/"
 $RSYNC models/           "$HOST:~/hermit-deploy/models/"
 $RSYNC tools/            "$HOST:~/hermit-deploy/tools/"
+$RSYNC assets/           "$HOST:~/hermit-deploy/assets/"
 
 # If provisioned, install into place. Uses sudo; the hermit user owns /opt/hermit.
 if ssh "$HOST" 'test -d /opt/hermit/bin'; then
@@ -56,9 +57,10 @@ if ssh "$HOST" 'test -d /opt/hermit/bin'; then
   ssh "$HOST" 'set -e
     sudo install -o hermit -g hermit -m 0755 ~/hermit-deploy/bin/hermit /opt/hermit/bin/hermit
     sudo cp -a ~/hermit-deploy/config/. /opt/hermit/config/
-    sudo install -d -o hermit -g hermit /opt/hermit/models
+    sudo install -d -o hermit -g hermit /opt/hermit/models /opt/hermit/assets
     sudo cp -a ~/hermit-deploy/models/. /opt/hermit/models/
-    sudo chown -R hermit:hermit /opt/hermit/config /opt/hermit/models
+    sudo cp -a ~/hermit-deploy/assets/. /opt/hermit/assets/
+    sudo chown -R hermit:hermit /opt/hermit/config /opt/hermit/models /opt/hermit/assets
     /opt/hermit/bin/hermit --version'
   if [[ "$RESTART" == "--restart" ]]; then
     echo "== restarting hermit.service =="
