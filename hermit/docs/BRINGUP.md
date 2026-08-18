@@ -96,7 +96,7 @@ sudo apt-get install -y dfu-util usbutils
 # (Confirm the button against the Seeed wiki — revisions differ.)
 
 dfu-util -l                       # must list a DFU interface, alt=1 = upgrade
-sudo dfu-util -R -e -a 1 -D ~/respeaker-fw/respeaker_flex_ua-io16-lin.bin
+sudo dfu-util -R -e -a 1 -D ~/respeaker-fw/respeaker_flex_usb_l16k2ch_v1.0.3.bin
 ```
 
 The **2-channel linear** variant is required: channel 0 is the processed mono
@@ -556,6 +556,138 @@ streaming TTS pipeline — is dramatically harder than debugging them here with
 
 ---
 
+## Results — session log (2026-08-18, <pi-host>)
+
+Findings recorded live during bring-up. Anything still blank is genuinely not yet
+measured; do not treat a blank as a pass.
+
+### Environment (differs from the assumptions in this doc)
+
+| Field | Value | Note |
+|---|---|---|
+| Device | Raspberry Pi 4 Model B Rev 1.5, 905 MB usable | |
+| OS | **Debian 13 (trixie)**, not Bookworm | binary built on bookworm (glibc 2.36) runs fine on 2.41 — forward compat |
+| Network | **wlan0**, <redacted-lan-ip>; eth0 DOWN | spec prefers Ethernet; Wi-Fi jitter is in every number below |
+| Power | under-voltage logged at boot (`0x50005` → `0x50000`) | 40 °C, so power not thermal. Confirm 5.1 V/3 A PSU. |
+| dpkg state | interrupted dist-upgrade found; repaired with `dpkg --configure -a` | caused by the power loss; blocked ALL package installs |
+
+### Step 0 — Board enumeration BEFORE flashing
+
+| Field | Value |
+|---|---|
+| `lsusb` | `2886:801c Seeed Technology Co., Ltd. reSpeaker XVF3800 Safe Mode` |
+| USB path | `usb 1-1.4`, SerialNumber 100026178261700018 |
+| Audio cards present | **none from the board** — only bcm2835 Headphones + 2× vc4hdmi |
+| `arecord -l` | empty |
+| Conclusion | ships I2S firmware as the spec predicted; USB flash is REQUIRED |
+
+Note: the DFU product id observed is **`2886:801c`**, not the `2886:001a` quoted on the
+Seeed wiki. Trust what `lsusb` reports on the day.
+
+### Cerebras TTFT from this Pi (gpt-oss-120b, reasoning_effort=low, stream=true)
+
+| Method | p50 | Note |
+|---|---|---|
+| Raw `curl`, fresh TLS each call | **497 ms** | 6 runs, 452–607 ms |
+| Daemon with pre-warmed pool | **366 ms** | 20-request bench |
+| **Saved by connection pre-warming** | **~130 ms** | validates spec §5 on hardware |
+
+RTT to api.cerebras.ai: 16 ms avg (9–26 ms, Wi-Fi).
+
+### Phase 1 gate — PASSED on device
+
+| Gate | p50 | p95 | Target | |
+|---|---|---|---|---|
+| Local overhead (route+recall+assemble) | 1.1 ms | 1.9 ms | ≤ 15 ms | PASS |
+| Text TTFT, no tools | 366 ms | 384 ms | < 700 ms | PASS |
+| Fast-path device command | 1.0 ms | 1.6 ms | < 50 ms | PASS |
+
+Command: `bench.sh --bin ~/hermit-deploy/bin/hermit --config ~/hermit-test/hermit.toml --runs 20`
+
+### BLOCKER — inadequate power supply (2026-08-18)
+
+Bring-up is halted here. The Pi cannot hold its 5 V rail:
+
+```
+hwmon hwmon1: Undervoltage detected!
+hwmon hwmon1: Voltage normalised
+... alternating continuously, every 10-20 s, at 43 C
+```
+
+`vcgencmd get_throttled` oscillates between `0x50000` and `0x50005` (bit 0 =
+under-voltage now, bit 2 = throttled now). Temperature is 43 C, so this is supply,
+not thermal.
+
+Observed consequences, in order of discovery:
+1. Pi dropped off the network three times, twice under load.
+2. A previous power loss left dpkg mid-transaction (`libc-bin`, `curl`, `gpg` and
+   ~15 others unpacked-but-unconfigured), which blocked ALL package installation
+   until repaired with `dpkg --configure -a`.
+3. **USB audio capture fails outright**: `arecord` returns
+   `pcm_read: read error: Input/output error` with 0 frames captured, on `hw:`,
+   `plughw:`, and with explicit period/buffer sizing. The device stays enumerated
+   in `lsusb` throughout.
+
+The capture failure is not yet *proven* to be caused by the brownouts — a firmware
+or driver quirk cannot be excluded — but USB peripherals are the first thing to
+fail under a sagging 5 V rail, and no diagnosis is trustworthy until the supply is
+stable. Do not chase the audio bug before fixing power.
+
+**Required:** the official Raspberry Pi 5.1 V / 3 A USB-C PSU, and a short, thick
+USB-C cable. Feeding the Flex from its own 5 V JST / 12 V input (spec §2) reduces
+the Pi's downstream USB load and demonstrably helped — `throttled` briefly cleared
+to `0x50000` — but did not fix it, because the under-voltage was present at first
+boot with NO USB device attached at all.
+
+**Risk if ignored:** repeated brownouts during SD writes risk filesystem corruption.
+One interrupted dist-upgrade has already happened.
+
+### Phases 6 + 7 — VERIFIED against the real model (dev machine, Cerebras only)
+
+These need no audio hardware, so they were validated while the Pi was down.
+
+**Tool calling against real gpt-oss-120b** (not a stub): the model emitted a
+`web_search` call, the streaming accumulator reassembled the fragmented SSE deltas
+with no parse warnings, the tool error (no Parallel key) was fed back, and the model
+degraded gracefully rather than failing the turn. `tool_rounds=1`, cap respected.
+
+**Learning loop.** Four conversational turns stating personal facts, then the
+reflection nudge fired twice and stored 4 facts:
+
+| Fact extracted | Tags | Importance |
+|---|---|---|
+| The user lives in Bergen, Norway. | location | 0.9 |
+| The user works night shifts and requests no news before 2 p.m. | schedule,news,preference | 0.9 |
+| The user has a border collie dog named Ada. | pet | 0.6 |
+| The user prefers to use metric units. | preference | 0.6 |
+
+All carry `source = reflection`. Standing instructions and identity correctly scored
+above incidental detail, exactly as the extraction prompt asks.
+
+**Cross-session recall.** A NEW session (fresh session_id, empty history) against the
+same database answered from memory alone:
+
+```
+what is my dog's name?                        -> Your dog's name is Ada.
+what units should you use when talking to me? -> I should use metric units when speaking with you.
+where do I live?                              -> You live in Bergen, Norway.
+```
+
+Recall took **0.7 ms** (gate: < 5 ms).
+
+**Firewall held**: `select count(*) from messages where role not in ('user','assistant')`
+returned **0** — no tool or web content reached the transcript that reflection reads.
+
+### Still to measure
+
+- [ ] Post-flash enumeration, `--dump-hw-params` (sets `tts.sample_rate`)
+- [ ] AEC suppression (ch0 vs ch1)
+- [ ] First-audio gates (needs TTS key)
+- [ ] Wake→listening, barge-in flush
+- [ ] 24 h thermal soak
+
+---
+
 ## Results — fill this in
 
 Date: ______________  Operator: ______________  Pi serial: ______________
@@ -564,7 +696,7 @@ Date: ______________  Operator: ______________  Pi serial: ______________
 
 | Field | Value |
 |---|---|
-| Firmware file flashed | `respeaker_flex_ua-io16-________.bin` |
+| Firmware file flashed | `respeaker_flex_usb_l16k2ch_v1.0.3.bin` (or: __________) |
 | `dfu-util` alt setting used | |
 | Card index from `aplay -l` | |
 | **Card short name** (→ `hermit.card`) | |

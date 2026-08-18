@@ -103,6 +103,10 @@ sample_rate = 16000
 buffer_ms = 200               # small: barge-in flushes what the driver holds
 period_ms = 20
 duck_db = -12.0               # music attenuation while speaking
+# REQUIRED on the XVF3800: its USB capture clock is slaved to the playback stream,
+# so the microphone returns EIO whenever playback goes idle. Measured on hardware.
+# Setting this false makes the device deaf. See src/audio/mod.rs::spawn_keepalive.
+keepalive_silence = true
 
 [memory]
 core_token_cap = 600          # hard cap on core.md

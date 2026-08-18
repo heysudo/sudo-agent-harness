@@ -58,12 +58,79 @@ impl AudioPlayer {
     ///
     /// ALSA calls block, so they live on a dedicated OS thread rather than a tokio
     /// worker — a blocked worker would stall unrelated tasks on a 4-core box.
+    /// Falls back to a silent backend if the audio device cannot be opened, rather
+    /// than refusing to start.
+    ///
+    /// This matters on a real device: the named PCM lives in `/etc/asound.conf`, so
+    /// a not-yet-provisioned box, a typo'd PCM name, or the reSpeaker being
+    /// unplugged would otherwise take down the whole daemon — including the text
+    /// and WebSocket front ends, which need no audio at all. Same policy as TTS and
+    /// the wake word: degrade loudly, keep serving. The error is logged at ERROR so
+    /// it cannot be mistaken for working audio.
     pub fn spawn(cfg: &crate::config::Audio) -> Result<Self> {
-        let backend = make_backend(cfg)?;
-        Self::spawn_with(backend, cfg.sample_rate)
+        let backend = match make_backend(cfg) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(
+                    error = ?e,
+                    pcm = %cfg.playback_pcm,
+                    "could not open the audio device; continuing with audio DISABLED. \
+                     Text and WebSocket still work. Check /etc/asound.conf and that the \
+                     reSpeaker is connected."
+                );
+                Box::new(null_sink::NullBackend::new(cfg.sample_rate))
+            }
+        };
+        // One period of silence per idle tick. See spawn_keepalive: without this the
+        // XVF3800's microphone returns EIO and the wake word never fires.
+        let keepalive_frames = if cfg.keepalive_silence {
+            ((cfg.sample_rate as usize / 1000) * cfg.period_ms as usize).max(64)
+        } else {
+            0
+        };
+        Self::spawn_keepalive(backend, cfg.sample_rate, keepalive_frames)
     }
 
-    pub fn spawn_with(mut backend: Box<dyn Backend>, sample_rate: u32) -> Result<Self> {
+    pub fn spawn_with(backend: Box<dyn Backend>, sample_rate: u32) -> Result<Self> {
+        Self::spawn_inner(backend, sample_rate, 0)
+    }
+
+    /// Spawn with a **keepalive silence** stream of `keepalive_frames` per idle tick.
+    ///
+    /// # Why this exists (measured on the XVF3800, 2026-08-18)
+    ///
+    /// The reSpeaker's USB capture endpoint is SYNC type and its capture clock is
+    /// slaved to the playback stream. Measured on hardware:
+    ///
+    /// | condition                      | result                       |
+    /// |--------------------------------|------------------------------|
+    /// | capture alone                  | `EIO`, zero frames           |
+    /// | capture while playback streams  | works, full-length audio     |
+    /// | capture after playback stops    | `EIO` again, immediately     |
+    ///
+    /// So the microphone only produces data while something is being played. A
+    /// voice assistant that only opens playback when it wants to speak would have a
+    /// **permanently deaf microphone** — no wake word, ever.
+    ///
+    /// The fix is to never let the playback stream go idle: when there is nothing
+    /// to play, write silence. At 16 kHz mono that is 32 kB/s of zeroes, which
+    /// costs nothing and has a second benefit — the XVF3800's AEC reference path
+    /// stays continuously fed, which is exactly what the LOCKED topology wants.
+    ///
+    /// Pass `keepalive_frames = 0` to disable (tests, and non-ALSA dev builds).
+    pub fn spawn_keepalive(
+        backend: Box<dyn Backend>,
+        sample_rate: u32,
+        keepalive_frames: usize,
+    ) -> Result<Self> {
+        Self::spawn_inner(backend, sample_rate, keepalive_frames)
+    }
+
+    fn spawn_inner(
+        mut backend: Box<dyn Backend>,
+        sample_rate: u32,
+        keepalive_frames: usize,
+    ) -> Result<Self> {
         // Depth 64: ~1.3 s of 20 ms chunks. Deep enough that TTS never stalls on a
         // slow write, shallow enough to bound RAM and flush latency.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AudioMsg>(64);
@@ -73,7 +140,44 @@ impl AudioPlayer {
         std::thread::Builder::new()
             .name("audio-out".into())
             .spawn(move || {
-                while let Some(msg) = rx.blocking_recv() {
+                let silence = vec![0i16; keepalive_frames];
+                // How long `silence` should take to play; used to pace the idle loop
+                // when the backend does not block (e.g. the null backend on a dev
+                // machine), so this never becomes a busy-spin.
+                let silence_dur = if sample_rate > 0 {
+                    std::time::Duration::from_secs_f64(
+                        keepalive_frames as f64 / sample_rate as f64,
+                    )
+                } else {
+                    std::time::Duration::from_millis(20)
+                };
+
+                loop {
+                    let msg = if keepalive_frames == 0 {
+                        // No keepalive: plain blocking wait.
+                        match rx.blocking_recv() {
+                            Some(m) => m,
+                            None => break,
+                        }
+                    } else {
+                        match rx.try_recv() {
+                            Ok(m) => m,
+                            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                                // Nothing to play: keep the device clocked.
+                                let started = std::time::Instant::now();
+                                if let Err(e) = backend.write(&silence) {
+                                    tracing::warn!(error = %e, "keepalive write failed");
+                                    std::thread::sleep(silence_dur);
+                                } else if started.elapsed() < silence_dur / 2 {
+                                    // Backend returned early (didn't block); pace manually.
+                                    std::thread::sleep(silence_dur.saturating_sub(started.elapsed()));
+                                }
+                                continue;
+                            }
+                            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                        }
+                    };
+
                     match msg {
                         AudioMsg::Pcm { generation, samples } => {
                             // Stale audio from before a barge-in: drop it silently.
@@ -317,6 +421,57 @@ mod tests {
         assert!(!got.contains(&9), "stale audio must never be written: {got:?}");
         assert_eq!(got, vec![7]);
         assert!(discards.load(Ordering::SeqCst) >= 1, "driver buffer must be dropped too");
+    }
+
+    #[test]
+    fn a_missing_audio_device_does_not_prevent_startup() {
+        // Regression: on an unprovisioned Pi the named PCM does not exist yet, and
+        // the daemon used to exit rather than serve text.
+        let cfg = crate::config::Audio {
+            playback_pcm: "definitely-not-a-real-pcm".into(),
+            ..Default::default()
+        };
+        assert!(
+            AudioPlayer::spawn(&cfg).is_ok(),
+            "a missing audio device must degrade to silence, not abort startup"
+        );
+    }
+
+    #[tokio::test]
+    async fn keepalive_writes_silence_while_idle() {
+        // The XVF3800 stops delivering capture the moment playback goes idle, so an
+        // idle player MUST keep writing. Regression guard for a deaf microphone.
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let discards = Arc::new(AtomicU64::new(0));
+        let p = AudioPlayer::spawn_keepalive(
+            Box::new(RecordingBackend { written: written.clone(), discards }),
+            16_000,
+            160, // 10 ms
+        )
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let n = written.lock().unwrap().len();
+        assert!(n >= 160, "expected keepalive silence while idle, got {n} samples");
+        assert!(
+            written.lock().unwrap().iter().all(|&s| s == 0),
+            "keepalive must be silence, not noise"
+        );
+        p.stop().await;
+    }
+
+    #[tokio::test]
+    async fn keepalive_disabled_writes_nothing_while_idle() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let discards = Arc::new(AtomicU64::new(0));
+        let _p = AudioPlayer::spawn_keepalive(
+            Box::new(RecordingBackend { written: written.clone(), discards }),
+            16_000,
+            0,
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(written.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

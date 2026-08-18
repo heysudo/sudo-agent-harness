@@ -81,10 +81,27 @@ Filenames follow the pattern below. **Take the exact names from the wiki** —
 the version suffix moves:
 
 ```
-respeaker_flex_ua-io16-lin.bin           <-- USB, 2-channel, LINEAR   ← flash this
-respeaker_flex_ua-io16-cir.bin               USB, 2-channel, circular
-respeaker_flex_ua-io16-6ch-lin.bin           USB, 6-channel, linear
-respeaker_flex_inthost-lr16-lin-i2c.bin      I2S, linear (what ships)
+respeaker_flex_usb_l16k2ch_v1.0.3.bin    <-- USB, LINEAR, 16 kHz, 2-channel  ← flash this
+respeaker_flex_usb_c16k2ch_v1.0.3.bin        USB, circular, 16 kHz, 2-channel   (wrong array shape)
+respeaker_flex_usb_l48k2ch_v1.0.3.bin        USB, linear, 48 kHz, 2-channel     (wrong rate for us)
+respeaker_flex_usb_l16k6ch_v1.0.3.bin        USB, linear, 16 kHz, 6-channel     (raw mics; wrong)
+respeaker_flex_i2s_l16k2ch_v1.0.3.bin        I2S, linear, 16 kHz                (what ships)
+
+NOTE ON NAMES: the Seeed wiki prose refers to these as `respeaker_flex_ua-io16-lin.bin`
+etc. The files as actually published in the firmware repo use the scheme above:
+`<bus>_<l|c><rate>k<n>ch_v<ver>.bin` — l/c = linear/circular array, rate = 16k/48k,
+n = channel count. Trust the repo filenames, not the wiki prose.
+
+Source repo:  https://github.com/respeaker/reSpeaker_Flex  (xmos_firmwares/usb/)
+Direct link:  https://raw.githubusercontent.com/respeaker/reSpeaker_Flex/main/xmos_firmwares/usb/respeaker_flex_usb_l16k2ch_v1.0.3.bin
+Size:         929792 bytes
+SHA-256:      d54ffec32f523e2b0bea64fb2fc35c590e58397e6990bea043682b94252599f1
+A verified copy is checked into this repo at hermit/firmware/ alongside SHA256SUMS.
+
+WHY 16 kHz AND NOT 48 kHz: the XVF3800's entire DSP pipeline (AEC, beamforming, NS)
+runs at 16 kHz internally. The 48k firmware just resamples at the USB edge. Since we
+also request 16 kHz PCM from the TTS provider, the l16k variant means NOTHING in the
+chain ever resamples — which is exactly the zero-resampling path spec §2 asks for.
 ```
 
 Mnemonic: `ua` = USB audio, `io16` = 16 kHz, `lin` = linear array, `6ch` = the
@@ -169,7 +186,7 @@ longer. Do not proceed.
 ## 4. Flash
 
 ```bash
-sudo dfu-util -R -e -a 1 -D ~/respeaker-fw/respeaker_flex_ua-io16-lin.bin
+sudo dfu-util -R -e -a 1 -D ~/respeaker-fw/respeaker_flex_usb_l16k2ch_v1.0.3.bin
 ```
 
 What each flag does:

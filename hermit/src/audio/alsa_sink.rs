@@ -20,17 +20,12 @@ pub struct AlsaBackend {
     pcm: PCM,
     /// Retained for the error message on reopen.
     device: String,
-    sample_rate: u32,
 }
 
 impl AlsaBackend {
     pub fn open(cfg: &crate::config::Audio) -> Result<Self> {
         let pcm = Self::open_pcm(&cfg.playback_pcm, cfg)?;
-        Ok(Self {
-            pcm,
-            device: cfg.playback_pcm.clone(),
-            sample_rate: cfg.sample_rate,
-        })
+        Ok(Self { pcm, device: cfg.playback_pcm.clone() })
     }
 
     fn open_pcm(name: &str, cfg: &crate::config::Audio) -> Result<PCM> {

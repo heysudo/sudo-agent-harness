@@ -16,34 +16,47 @@ of playback — speech, Spotify, radio — go through it, so the XVF3800's hardw
 canceller always has a loopback reference. That is what makes barge-in work: the wake
 word is heard while music is playing.
 
-## Latency targets
-
-| Gate | Target |
-| --- | --- |
-| Local harness overhead (route + recall + assemble) | ≤ 15 ms |
-| Text: first token, no tools | < 700 ms |
-| Voice: first audio, no tools | < 1.2 s |
-| Voice: first audio, one web search | < 2.0 s |
-| Fast-path device command (pause/volume/next) | < 50 ms, no LLM call |
+## Latency targets, and what is measured
 
 `scripts/bench.sh` measures all five and exits non-zero if any p50 misses.
 
+| Gate | Target | Measured on the Pi |
+| --- | --- | --- |
+| Local harness overhead (route + recall + assemble) | ≤ 15 ms | **1.1 ms** ✅ |
+| Text: first token, no tools | < 700 ms | **366 ms** ✅ |
+| Fast-path device command (pause/volume/next) | < 50 ms, no LLM call | **1.0 ms** ✅ |
+| Voice: first audio, no tools | < 1.2 s | needs a TTS key |
+| Voice: first audio, one web search | < 2.0 s | needs TTS + search keys |
+
+Measured on a Raspberry Pi 4 over Wi-Fi against live Cerebras. **Connection
+pre-warming is worth ~130 ms of that**: raw `curl` with a cold TLS handshake gets first
+byte in 497 ms p50, the daemon with a pooled warm connection in 366 ms.
+
 ## Build and deploy
 
-Never compile on the Pi.
+Never compile on the Pi. You need Docker (on macOS: `brew install colima docker &&
+colima start`).
 
 ```bash
-cargo install cross --git https://github.com/cross-rs/cross
 cd hermit
-export PKG_CONFIG_ALLOW_CROSS=1
-cross build --release --target aarch64-unknown-linux-gnu --features pi
+scripts/build-pi.sh                 # -> target/aarch64-unknown-linux-gnu/release/hermit
+scripts/deploy.sh <pi-host>        # rsync binary + config + firmware to the Pi
 ```
 
-`--features pi` is required: it enables ALSA, the Porcupine wake word, and sd_notify.
-Without it `Type=notify` never sees `READY=1` and systemd kills the unit at start-up.
+`build-pi.sh` picks the right path for your host. **On Apple Silicon `cross` does not
+work** — its image for this target is x86_64-only and it dies trying to install an
+x86_64 toolchain in an arm64 container. Since host and target are both aarch64 there,
+the script just runs `cargo build` inside an arm64 `rust:1-bookworm` container: no
+emulation, and the same glibc 2.36 as Raspberry Pi OS Bookworm. On x86_64 hosts it
+falls back to `cross` per `deploy/Cross.toml`.
 
-Then, per `deploy/README.md`: flash firmware → `provision.sh` → rsync binary and
-config → fill `/etc/hermit/hermit.env` → start the service.
+The build is always `--features pi`: that enables ALSA, the Porcupine wake word, and
+sd_notify. Without it `Type=notify` never sees `READY=1` and systemd kills the unit at
+start-up.
+
+Then, per `deploy/README.md`: flash firmware → `provision.sh` → deploy → fill
+`/etc/hermit/hermit.env` → start the service. `scripts/phase0.sh` runs on the Pi and
+collects every Phase 0 fact into one report.
 
 ```bash
 cargo test            # 192 tests, no network or API keys needed
@@ -107,6 +120,9 @@ this size it retrieves at least as well as a small embedding model would.
 These were adapted per the spec's "adapt parameter names, never the architecture" rule.
 None change the design.
 
+0. **`cross` is unusable on Apple Silicon.** See "Build and deploy" above; the
+   `scripts/build-pi.sh` native-container path replaces it there.
+
 1. **Porcupine has no Rust binding any more.** `pv_porcupine` on crates.io is an empty
    0.0.0 placeholder, and `Picovoice/porcupine` no longer ships `binding/rust` at all.
    Porcupine is still the engine; it is bound through its stable five-function C ABI,
@@ -129,6 +145,33 @@ None change the design.
    everything on a mature one. Containment is corpus-independent and reads as a plain
    fraction (`memory.dedupe_similarity`, default 0.8).
 
+## Hardware findings (measured, not assumed)
+
+The reSpeaker Flex XVF3800 accepts **16 kHz and no other rate**, in both directions.
+Since TTS is requested at 16 kHz too, nothing in the chain ever resamples.
+
+**Its capture clock is slaved to the playback stream.** Capture alone returns `EIO` with
+zero frames; capture while playback streams works; capture the moment playback stops
+fails again. A voice assistant that only opens playback when it wants to speak would
+have a permanently deaf microphone. `AudioPlayer::spawn_keepalive` therefore writes
+silence whenever the play queue is empty (`audio.keepalive_silence`, default on). It
+also keeps the AEC reference continuously fed.
+
+**Hardware AEC confirmed.** Recording both channels with silence, then with a 440 Hz
+tone playing through the speaker:
+
+| channel | silence | tone playing | Δ |
+|---|---|---|---|
+| ch0 (processed) | −50.4 dBFS | −57.2 dBFS | **−6.8 dB** |
+| ch1 (reference) | −43.1 dBFS | −27.7 dBFS | **+15.4 dB** |
+
+~22 dB relative suppression — the echo is cancelled, and ch0 is the correct channel for
+the daemon.
+
+The board already shipped USB firmware, so no flash was needed; a verified image is
+kept in `firmware/` regardless. Its DFU id is `2886:801c` (the wiki says `001a`, which
+is the *normal* mode id here).
+
 ## Verification status
 
 **Verified here** — 192 tests pass on the dev machine with no network and no API keys:
@@ -137,12 +180,14 @@ streaming tool-call reassembly, the 2-round cap, mpv IPC (against a fake mpv spe
 the real dialect), audio mixing and barge-in generation logic, and the Cartesia/
 Deepgram/Parallel/Firecrawl request shapes.
 
+**Verified by the aarch64 build** — `scripts/build-pi.sh` compiles the full
+`--features pi` graph for the Pi, including `src/audio/alsa_sink.rs` against real ALSA
+headers, the Porcupine dlopen binding, and sd_notify. That build caught two bugs that
+existed only in feature-gated code (a missing `Path` import in the Porcupine module,
+and `sd-notify` 0.5 having dropped an argument from `notify()`); both are fixed.
+
 **Not verified here** — anything that needs the hardware or a paid key:
 
-- `src/audio/alsa_sink.rs` is the one module that cannot even be compile-checked on a
-  non-Linux dev machine (`alsa-sys` needs `libasound` + pkg-config for the target). It
-  is deliberately thin — all routing, downmixing and the speaker-protection ceiling
-  live in `deploy/asound.conf` — and is first compiled by `cross build --features pi`.
 - Real TTFT, first-audio and barge-in numbers. Run `scripts/bench.sh` on the Pi.
 - The Porcupine C ABI call, against the real `libpv_porcupine.so`.
 - Live Cartesia / Deepgram / Parallel / Firecrawl / Spotify responses.

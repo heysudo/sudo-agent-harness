@@ -22,8 +22,22 @@
 #   never be one.
 #
 # WHAT YOU RUN:
+#   scripts/build-pi.sh
+#
+#   That script picks the right path for your host. READ THIS IF YOU ARE ON AN
+#   APPLE SILICON MAC: `cross` DOES NOT WORK there. Its published image for this
+#   target is x86_64-only, so on an arm64 host it tries to install an x86_64
+#   Rust toolchain inside an arm64 container and fails with
+#   "toolchain 'stable-x86_64-unknown-linux-gnu' may not be able to run on this
+#   system". Verified 2026-08 with cross 0.2.5. Because host and target are then
+#   the SAME architecture, build-pi.sh instead runs a plain `cargo build` inside
+#   an arm64 rust:1-bookworm container — no emulation, no cross-linker, same
+#   glibc (2.36) as Raspberry Pi OS Bookworm. This file is only used on x86_64
+#   hosts. Manually, that path is:
+#
 #   rustup target add aarch64-unknown-linux-gnu     # once
-#   cargo install cross --git https://github.com/cross-rs/cross  # once
+#   cargo install cross --locked                     # once
+#   export PKG_CONFIG_ALLOW_CROSS=1 CROSS_CONFIG=deploy/Cross.toml
 #   cross build --release --target aarch64-unknown-linux-gnu --features pi
 #
 #   Output: target/aarch64-unknown-linux-gnu/release/hermit

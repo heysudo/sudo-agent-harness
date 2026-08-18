@@ -306,6 +306,12 @@ pub struct Audio {
     pub period_ms: u32,
     /// Music attenuation while TTS is speaking.
     pub duck_db: f32,
+    /// Keep the playback stream alive with silence when nothing is playing.
+    ///
+    /// REQUIRED on the reSpeaker XVF3800: its USB capture clock is slaved to the
+    /// playback stream, so the microphone returns EIO whenever playback is idle.
+    /// Measured on hardware 2026-08-18. Turning this off makes the device deaf.
+    pub keepalive_silence: bool,
 }
 
 impl Default for Audio {
@@ -317,6 +323,7 @@ impl Default for Audio {
             buffer_ms: 200,
             period_ms: 20,
             duck_db: -12.0,
+            keepalive_silence: true,
         }
     }
 }

@@ -341,7 +341,7 @@ fn read_prompt(dir: &std::path::Path, name: &str) -> String {
 
 #[cfg(feature = "systemd")]
 fn notify_ready() {
-    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+    if let Err(e) = sd_notify::notify(&[sd_notify::NotifyState::Ready]) {
         tracing::debug!(error = %e, "sd_notify READY failed (not running under systemd?)");
     }
 }
@@ -358,7 +358,7 @@ async fn watchdog_loop() {
     let mut tick = tokio::time::interval(Duration::from_secs(10));
     loop {
         tick.tick().await;
-        let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog]);
+        let _ = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]);
     }
 }
 

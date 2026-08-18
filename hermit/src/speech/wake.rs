@@ -170,6 +170,7 @@ pub mod porcupine {
     use super::*;
     use libloading::{Library, Symbol};
     use std::ffi::{CStr, CString, c_char, c_float, c_int, c_void};
+    use std::path::Path;
 
     type PvStatus = c_int;
     const PV_STATUS_SUCCESS: PvStatus = 0;
