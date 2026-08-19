@@ -1,6 +1,5 @@
 <div align="center">
 
-![HERMIT](docs/hero.jpg)
 
 # HERMIT
 
