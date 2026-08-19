@@ -68,7 +68,7 @@ rustc. Builds run in an arm64 container on your dev machine.
 cd hermit
 scripts/build-pi.sh                # arm64 binary via rust:1-bookworm container
 scripts/deploy.sh <pi-host>        # rsync binary + config + firmware
-cargo test                         # 231 tests; no network, no API keys
+cargo test                         # 232 tests; no network, no API keys
 ```
 
 Then flash the mic-array firmware, run `deploy/provision.sh` on the Pi, fill

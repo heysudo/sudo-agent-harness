@@ -80,7 +80,7 @@ fighting. The daemon publishes its actual volume in `live.json`; the console
 gauge shows that truth, marking a not-yet-acknowledged request with `*`.
 
 ```bash
-cargo test            # 231 tests, no network or API keys needed
+cargo test            # 232 tests, no network or API keys needed
 cargo run -- check --config config/hermit.toml   # validate config
 ```
 
@@ -195,7 +195,7 @@ is the *normal* mode id here).
 
 ## Verification status
 
-**Verified here** — 231 tests pass on the dev machine with no network and no API keys:
+**Verified here** — 232 tests pass on the dev machine with no network and no API keys:
 the chunker, router, memory and firewall, tool schemas and dispatch, SSE decoding and
 streaming tool-call reassembly, the 2-round cap, mpv IPC (against a fake mpv speaking
 the real dialect), audio mixing and barge-in generation logic, and the Cartesia/
@@ -218,7 +218,14 @@ to record.
 
 ## Honest limitations
 
-- **Spotify Connect control requires Premium.** There is no way around this.
+- **Spotify Connect on new accounts is broken by Spotify, not by this project.**
+  Accounts on Spotify's post-2024 DRM path get every legacy audio-key request
+  refused (`error audio key 0 1`), on Premium too, across librespot, spotifyd
+  and go-librespot alike; only official clients with licensed DRM play. Search,
+  Connect registration and device control all still work. When playback cannot
+  produce audio the daemon detects the stall (progress, not status flags) and
+  falls back to YouTube via mpv + yt-dlp, labelled honestly "(via YouTube)".
+  Spotify Connect control still requires Premium.
 - **Apple Music cannot be driven by the agent.** AirPlay (`shairport-sync`, optional
   and off by default) lets you *push* audio to the device from an Apple device, but
   the agent cannot control playback. Nothing on Linux can.

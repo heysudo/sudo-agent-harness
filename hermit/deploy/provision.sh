@@ -346,6 +346,39 @@ install_packages() {
     fi
 
     install_librespot
+    install_ytdlp
+}
+
+# ---------------------------------------------------------------------------
+# yt-dlp: resolver for the YouTube music fallback (play_youtube).
+#
+# Spotify's account-level DRM migration refuses audio keys to open-source
+# Connect receivers, so the daemon falls back to mpv + yt-dlp for song
+# requests. The apt package trails upstream badly and YouTube breaks old
+# extractors, so prefer the standalone release binary staged by the operator;
+# apt is the fallback. Update occasionally: yt-dlp -U (standalone builds
+# self-update; apt builds do not).
+# ---------------------------------------------------------------------------
+install_ytdlp() {
+    if command -v yt-dlp >/dev/null 2>&1; then
+        log "yt-dlp present at $(command -v yt-dlp) ($(yt-dlp --version 2>/dev/null || echo '?'))"
+        return
+    fi
+
+    if apt-cache show yt-dlp >/dev/null 2>&1; then
+        log "installing yt-dlp from apt (note: apt versions age badly against YouTube changes)"
+        apt-get install -y -qq --no-install-recommends yt-dlp
+        changed "installed yt-dlp from apt"
+        return
+    fi
+
+    warn "yt-dlp is not installed; the YouTube music fallback will not work until it is."
+    todo "Install yt-dlp manually:
+       1. On your DEV machine, download the standalone binary
+            https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64
+       2. Copy it over and install:
+            sudo install -o root -g root -m 0755 yt-dlp_linux_aarch64 /usr/local/bin/yt-dlp
+       3. Verify:  yt-dlp --version"
 }
 
 # ---------------------------------------------------------------------------
