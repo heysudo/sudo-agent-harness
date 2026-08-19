@@ -1,5 +1,7 @@
 <div align="center">
 
+![HERMIT](docs/hero.jpg)
+
 # HERMIT
 
 **A voice-first personal agent that lives on a 1 GB Raspberry Pi.**
