@@ -15,7 +15,7 @@
 
 use super::Gateway;
 use crate::speech::earcons::Earcons;
-use crate::speech::stt::{Deepgram, SttEvent, TranscriptBuilder};
+use crate::speech::stt::{Deepgram, Sarvam, SttEvent, SttSession, TranscriptBuilder};
 use crate::speech::wake::{FrameFeeder, WakeDetector};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,15 +59,34 @@ pub async fn run(
 ) {
     let cfg = gateway.config();
 
-    let Some(deepgram) = Deepgram::from_config(&cfg.stt) else {
-        tracing::warn!(
-            "DEEPGRAM_API_KEY not set; voice input disabled (text front ends still work)"
-        );
-        // Drain the microphone so the capture thread does not block forever.
-        while mic_rx.recv().await.is_some() {}
-        return;
+    let stt: Arc<dyn SttSession> = match cfg.stt.provider.as_str() {
+        "sarvam" => {
+            tracing::info!(language = %cfg.stt.sarvam_language, "stt provider: sarvam");
+            match Sarvam::from_config(&cfg.stt) {
+                Some(s) => Arc::new(s),
+                None => {
+                    tracing::warn!(
+                        "SARVAM_API_KEY not set; voice input disabled (text front ends still work)"
+                    );
+                    while mic_rx.recv().await.is_some() {}
+                    return;
+                }
+            }
+        }
+        _ => {
+            tracing::info!(model = %cfg.stt.model, "stt provider: deepgram");
+            match Deepgram::from_config(&cfg.stt) {
+                Some(d) => Arc::new(d),
+                None => {
+                    tracing::warn!(
+                        "DEEPGRAM_API_KEY not set; voice input disabled (text front ends still work)"
+                    );
+                    while mic_rx.recv().await.is_some() {}
+                    return;
+                }
+            }
+        }
     };
-    let deepgram = Arc::new(deepgram);
 
     let mut feeder = FrameFeeder::new(detector);
     let listening = Arc::new(AtomicBool::new(false));
@@ -154,7 +173,7 @@ pub async fn run(
         tracing::info!(flush_us = wake_at.elapsed().as_micros(), "listening");
 
         let gw = gateway.clone();
-        let dg = deepgram.clone();
+        let stt = stt.clone();
         let flag = listening.clone();
         let ec = earcons.clone();
         let turn_state = state.clone();
@@ -167,7 +186,7 @@ pub async fn run(
         // it audio until it signals completion.
         let handle = tokio::spawn(async move {
             let result =
-                transcribe_and_answer(gw.clone(), dg, utt_rx, wake_at, ec, turn_state).await;
+                transcribe_and_answer(gw.clone(), stt, utt_rx, wake_at, ec, turn_state).await;
             gw.music.unduck().await;
             flag.store(false, Ordering::Release);
             result
@@ -258,13 +277,13 @@ async fn forward_until_done(
 /// Stream to Deepgram, fire a speculative search, then answer.
 async fn transcribe_and_answer(
     gateway: Arc<Gateway>,
-    deepgram: Arc<Deepgram>,
+    stt: Arc<dyn SttSession>,
     mut mic_rx: MicRx,
     wake_at: std::time::Instant,
     earcons: Arc<Earcons>,
     state: Arc<Mutex<crate::state_io::StateWriter>>,
 ) -> Option<String> {
-    let (audio_tx, mut events) = match deepgram.start().await {
+    let (audio_tx, mut events) = match stt.start().await {
         Ok(x) => x,
         Err(e) => {
             tracing::error!(error = %e, "could not open speech-to-text");

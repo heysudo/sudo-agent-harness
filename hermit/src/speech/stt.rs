@@ -14,6 +14,8 @@ use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 
+use base64::Engine;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SttEvent {
     /// Unstable partial transcript. Safe to act on speculatively, never to answer.
@@ -173,6 +175,219 @@ impl Deepgram {
         });
 
         Ok((audio_tx, event_rx))
+    }
+}
+
+/// A streaming STT session: one websocket connection, one utterance.
+///
+/// Implemented by Deepgram (English) and Sarvam (Hindi/Odia/Indian-English).
+/// The voice pipeline only needs to open the session and pump audio in; the
+/// provider-specific framing lives inside each implementation.
+#[async_trait::async_trait]
+pub trait SttSession: Send + Sync {
+    /// Open a transcription session.
+    ///
+    /// Returns a sender for raw mono PCM and a receiver of transcript events.
+    /// Drop the sender to signal end of audio; the session finalizes and closes.
+    async fn start(
+        &self,
+    ) -> Result<(
+        tokio::sync::mpsc::Sender<Vec<i16>>,
+        tokio::sync::mpsc::Receiver<SttEvent>,
+    )>;
+}
+
+#[async_trait::async_trait]
+impl SttSession for Deepgram {
+    async fn start(
+        &self,
+    ) -> Result<(
+        tokio::sync::mpsc::Sender<Vec<i16>>,
+        tokio::sync::mpsc::Receiver<SttEvent>,
+    )> {
+        self.start().await
+    }
+}
+
+#[async_trait::async_trait]
+impl SttSession for Sarvam {
+    async fn start(
+        &self,
+    ) -> Result<(
+        tokio::sync::mpsc::Sender<Vec<i16>>,
+        tokio::sync::mpsc::Receiver<SttEvent>,
+    )> {
+        self.start().await
+    }
+}
+
+// ==========================================================================
+// Sarvam Saaras v3 realtime STT — for Hindi / Odia / Indian-English speakers.
+//
+// Wire format differs from Deepgram in three ways that matter here:
+//   1. Auth is `api-subscription-key`, not `Authorization: Token`.
+//   2. Audio goes up as base64 JSON `{"event":"audio_input","audio":"..."}`,
+//      not raw binary frames.
+//   3. Events are `transcript.partial` / `transcript.final` / `error`, not
+//      Deepgram's `Results`/`speech_final` shape.
+//
+// We keep the same `SttEvent` surface so the rest of the pipeline is untouched.
+// ==========================================================================
+
+pub struct Sarvam {
+    url: String,
+    api_key: String,
+    language: String,
+    stream_type: String,
+    silence_ms: u32,
+    max_utterance: Duration,
+}
+
+impl Sarvam {
+    pub fn from_config(cfg: &crate::config::Stt) -> Option<Self> {
+        let api_key = crate::http::secret_opt("SARVAM_API_KEY")?;
+        Some(Self {
+            url: cfg.sarvam_url.clone(),
+            api_key,
+            language: cfg.sarvam_language.clone(),
+            stream_type: cfg.sarvam_stream_type.clone(),
+            silence_ms: cfg.sarvam_silence_ms,
+            max_utterance: Duration::from_millis(cfg.max_utterance_ms),
+        })
+    }
+
+    fn connect_url(&self) -> String {
+        format!(
+            "{}?language_code={}&stream_type={}&endpointing=vad&silence_duration_ms={}",
+            self.url.trim_end_matches('/'),
+            urlencoding::encode(&self.language),
+            urlencoding::encode(&self.stream_type),
+            self.silence_ms,
+        )
+    }
+
+    pub async fn start(
+        &self,
+    ) -> Result<(
+        tokio::sync::mpsc::Sender<Vec<i16>>,
+        tokio::sync::mpsc::Receiver<SttEvent>,
+    )> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let mut req = self.connect_url().into_client_request()?;
+        req.headers_mut().insert(
+            "api-subscription-key",
+            self.api_key.parse().context("invalid SARVAM_API_KEY")?,
+        );
+
+        let (ws, _) = tokio::time::timeout(
+            Duration::from_secs(4),
+            tokio_tungstenite::connect_async(req),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("sarvam connect timed out"))?
+        .context("connecting to sarvam")?;
+
+        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(32);
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel::<SttEvent>(32);
+        let max_utterance = self.max_utterance;
+
+        tokio::spawn(async move {
+            let (mut sink, mut stream) = ws.split();
+            let deadline = tokio::time::sleep(max_utterance);
+            tokio::pin!(deadline);
+
+            let mut audio_open = true;
+            loop {
+                tokio::select! {
+                    biased;
+
+                    incoming = stream.next() => {
+                        let Some(incoming) = incoming else {
+                            let _ = event_tx.send(SttEvent::Closed(None)).await;
+                            return;
+                        };
+                        match incoming {
+                            Ok(Message::Text(t)) => {
+                                if let Some(ev) = parse_sarvam_event(&t) {
+                                    let _ = event_tx.send(ev).await;
+                                }
+                            }
+                            Ok(Message::Close(frame)) => {
+                                let detail = frame.map(|f| format!("code={} reason={}", f.code, f.reason));
+                                let _ = event_tx.send(SttEvent::Closed(detail)).await;
+                                return;
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                let _ = event_tx.send(SttEvent::Closed(Some(e.to_string()))).await;
+                                return;
+                            }
+                        }
+                    }
+
+                    chunk = audio_rx.recv(), if audio_open => {
+                        match chunk {
+                            Some(samples) => {
+                                // linear16 mono → base64 JSON frame
+                                let mut bytes = Vec::with_capacity(samples.len() * 2);
+                                for s in samples {
+                                    bytes.extend_from_slice(&s.to_le_bytes());
+                                }
+                                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                                let frame = serde_json::json!({"event":"audio_input","audio":b64}).to_string();
+                                if sink.send(Message::Text(frame.into())).await.is_err() {
+                                    let _ = event_tx.send(SttEvent::Closed(Some("send failed".into()))).await;
+                                    return;
+                                }
+                            }
+                            None => {
+                                // End of audio: graceful close.
+                                audio_open = false;
+                                let _ = sink.send(Message::Text(
+                                    r#"{"event":"end"}"#.to_string().into()
+                                )).await;
+                            }
+                        }
+                    }
+
+                    _ = &mut deadline => {
+                        tracing::warn!(?max_utterance, "sarvam session hit its ceiling; closing");
+                        let _ = sink.send(Message::Text(r#"{"event":"end"}"#.to_string().into())).await;
+                        let _ = event_tx.send(SttEvent::Closed(Some("max utterance exceeded".into()))).await;
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok((audio_tx, event_rx))
+    }
+}
+
+/// Decode one Sarvam realtime frame into an event.
+///
+/// Shapes:
+///   `{"event":"transcript.partial","text":"..."}`
+///   `{"event":"transcript.final","text":"..."}`
+///   `{"event":"error","code":N,"is_fatal":bool,"message":"..."}`
+///   `{"event":"vad.speech_start"}` / `{"event":"vad.speech_end"}` — informational only.
+pub fn parse_sarvam_event(raw: &str) -> Option<SttEvent> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    match v.get("event").and_then(|e| e.as_str()) {
+        Some("transcript.partial") => {
+            let t = v.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+            if t.is_empty() { None } else { Some(SttEvent::Interim(t.to_string())) }
+        }
+        Some("transcript.final") => {
+            let t = v.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+            if t.is_empty() { None } else { Some(SttEvent::EndOfSpeech(t.to_string())) }
+        }
+        Some("error") => {
+            let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("sarvam error");
+            Some(SttEvent::Closed(Some(msg.to_string())))
+        }
+        _ => None,
     }
 }
 

@@ -259,6 +259,18 @@ pub struct Stt {
     /// the turn finalizes with whatever was transcribed (interim included) rather
     /// than listening forever on a noisy line that never trips endpointing.
     pub max_utterance_ms: u64,
+
+    /// Which STT backend to use. "deepgram" (English-only) or "sarvam" (Hindi /
+    /// Odia / Indian-English). Default "deepgram" to keep existing behavior.
+    pub provider: String,
+    /// Sarvam realtime websocket endpoint.
+    pub sarvam_url: String,
+    /// BCP-47 language for Sarvam, or "auto" for per-utterance detection.
+    pub sarvam_language: String,
+    /// Latency/accuracy tradeoff: "fast" | "balanced" | "simulated".
+    pub sarvam_stream_type: String,
+    /// Server-side VAD silence before finalizing an utterance (ms).
+    pub sarvam_silence_ms: u32,
 }
 
 impl Default for Stt {
@@ -270,6 +282,12 @@ impl Default for Stt {
             endpointing_ms: 300,
             sample_rate: 16_000,
             max_utterance_ms: 8_000,
+
+            provider: "deepgram".into(),
+            sarvam_url: "wss://api.sarvam.ai/speech-to-text-realtime/ws".into(),
+            sarvam_language: "auto".into(),
+            sarvam_stream_type: "fast".into(),
+            sarvam_silence_ms: 500,
         }
     }
 }
