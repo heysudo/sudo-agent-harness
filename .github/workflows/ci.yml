@@ -52,5 +52,5 @@ jobs:
       # (it failed at 5.47ms against the 5ms gate while the code was fine).
       # Release mode is where those budgets mean something, so enforce them
       # here. scripts/bench.sh on real hardware remains authoritative.
-      - name: tests (release — enforces the real latency budgets)
-        run: cargo test --release
+      - name: tests (perf profile — enforces the real latency budgets)
+        run: cargo test --profile perf

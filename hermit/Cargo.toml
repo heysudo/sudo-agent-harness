@@ -93,3 +93,14 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+# Latency-gate testing. `strict_latency_gates()` keys off debug-assertions, so
+# any release-derived profile enforces the spec's millisecond budgets — but the
+# device profile's fat LTO + single codegen unit costs 15+ minutes to compile
+# and buys nothing for a test run. This trades that for a fast optimized build.
+# Used by CI: `cargo test --profile perf`.
+[profile.perf]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = "none"
