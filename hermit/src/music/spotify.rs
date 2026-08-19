@@ -107,6 +107,11 @@ pub struct PlaybackState {
     pub is_playing: bool,
     #[serde(default)]
     pub item: Option<Track>,
+    /// Position in the track. The DRM-stall discriminator: librespot reports
+    /// `is_playing=true` to the server even while the audio-key refusal stops
+    /// it decoding a single sample — but position never advances.
+    #[serde(default)]
+    pub progress_ms: Option<u64>,
 }
 
 impl SpotifyClient {
@@ -334,28 +339,37 @@ impl SpotifyClient {
         }
 
         // Spotify returns 204 when it accepts the command, even if the Connect
-        // receiver then fails to fetch/decrypt audio. Verify that playback really
-        // became active so the voice agent never says "Playing ..." after silence.
-        let mut consecutive_confirmations = 0u8;
-        for _ in 0..8 {
+        // receiver then fails to fetch/decrypt audio. Worse, librespot reports
+        // `is_playing=true` to the server while its decoder is stalled on a
+        // refused audio key (the account-level DRM migration, librespot#1649),
+        // so a "playing" flag alone is a false oracle — it confirmed silence
+        // as success here. The discriminator is PROGRESS: a stalled receiver
+        // never advances position. Require the track position to move forward
+        // across polls before claiming success to the user.
+        let mut last_progress: Option<u64> = None;
+        let mut advanced_ms: u64 = 0;
+        for _ in 0..10 {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if let Ok(state) = self.state().await
-                && playback_matches(&state, uri)
+            let Ok(state) = self.state().await else { continue };
+            if !playback_matches(&state, uri) {
+                last_progress = None;
+                advanced_ms = 0;
+                continue;
+            }
+            if let (Some(prev), Some(cur)) = (last_progress, state.progress_ms)
+                && cur > prev
             {
-                consecutive_confirmations += 1;
-                // A receiver can briefly report "playing" before its audio-key/CDN
-                // fetch fails. Require two seconds of sustained state before claiming
-                // success to the user.
-                if consecutive_confirmations >= 5 {
+                advanced_ms += cur - prev;
+                // Two full seconds of forward motion means real, decoded audio.
+                if advanced_ms >= 2000 {
                     return Ok(());
                 }
-            } else {
-                consecutive_confirmations = 0;
             }
+            last_progress = state.progress_ms;
         }
         bail!(
-            "Spotify accepted the request, but playback did not start on {:?}. \
-             Check hermit-librespot logs; radio remains available.",
+            "Spotify accepted the request, but audio never advanced on {:?} \
+             (audio-key/DRM stall). Check hermit-librespot logs.",
             self.device_name
         )
     }

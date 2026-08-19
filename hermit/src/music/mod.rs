@@ -248,7 +248,29 @@ impl MusicController {
             self.effective_volume(&st)
         };
         self.mpv.set_volume(vol).await?;
-        Ok(label)
+        // Same honesty bar as Spotify: never tell the user "playing" until
+        // audio time is actually advancing. yt-dlp resolution takes a few
+        // seconds; a failed resolve leaves mpv idle rather than erroring the
+        // loadfile command, so loadfile's Ok() proves nothing by itself.
+        let mut last: Option<f64> = None;
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let Ok(v) = self.mpv.get_property("playback-time").await else { continue };
+            let Some(cur) = v.as_f64() else { continue };
+            if let Some(prev) = last
+                && cur > prev + 0.5
+            {
+                return Ok(label);
+            }
+            last = Some(cur);
+        }
+        let _ = self.mpv.stop().await;
+        {
+            let mut st = self.state.write().await;
+            st.source = Source::None;
+            st.now_playing = None;
+        }
+        bail!("YouTube playback did not start for {query:?} (yt-dlp resolve failed or stream stalled)")
     }
 
     pub async fn play_station(&self, name: &str) -> Result<()> {
