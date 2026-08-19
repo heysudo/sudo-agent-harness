@@ -61,15 +61,26 @@ collects every Phase 0 fact into one report.
 ### Operator console
 
 `sudo-console` is installed on the Pi by `provision.sh`. It is a dependency-free
-curses TUI showing the live microphone waveform/RMS level, wake-word score and
-threshold, wake activations, interim/final user transcripts, and assistant replies.
-Keys: `m` mic mute, `s` speaker mute, `r` restart HERMIT, `b` reboot, `p` power off,
-and `q` quit. Lifecycle actions require a second `y` confirmation and pass through a
-fixed root-owned helper with a narrowly scoped sudoers rule; the TUI never receives
-general root access.
+curses TUI with labelled sections (CONTROLS / AUDIO / CONVERSATION / ACTIVITY)
+showing the live microphone waveform/RMS level, wake-word score and threshold,
+music volume, wake activations, interim/final user transcripts, and assistant
+replies. Keys: `m` mic mute, `s` speaker mute, `-`/`+` volume in 5% steps
+(arrow keys work too), `r` restart HERMIT, `b` reboot, `p` power off, and `q`
+quit. Lifecycle actions require a second `y` confirmation and pass through a
+fixed root-owned helper with a narrowly scoped sudoers rule; the TUI never
+receives general root access.
+
+Mutes and volume ride the same `control.json` lease file but with different
+semantics, both deliberate: mutes are a **lease** (TTL-expired, so a crashed
+console can never leave the device deaf or silent), while volume is a
+**command** — sent only after the operator first touches `-`/`+`, applied by
+the daemon edge-triggered, and persistent after the console exits. That is
+what lets console volume and voice volume ("Sudo, volume up") coexist without
+fighting. The daemon publishes its actual volume in `live.json`; the console
+gauge shows that truth, marking a not-yet-acknowledged request with `*`.
 
 ```bash
-cargo test            # 215 tests, no network or API keys needed
+cargo test            # 231 tests, no network or API keys needed
 cargo run -- check --config config/hermit.toml   # validate config
 ```
 
@@ -184,7 +195,7 @@ is the *normal* mode id here).
 
 ## Verification status
 
-**Verified here** — 215 tests pass on the dev machine with no network and no API keys:
+**Verified here** — 231 tests pass on the dev machine with no network and no API keys:
 the chunker, router, memory and firewall, tool schemas and dispatch, SSE decoding and
 streaming tool-call reassembly, the 2-round cap, mpv IPC (against a fake mpv speaking
 the real dialect), audio mixing and barge-in generation logic, and the Cartesia/

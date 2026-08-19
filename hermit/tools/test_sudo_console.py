@@ -92,6 +92,17 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(len(console.bar(-30, -60, 0, 12)), 12)
         self.assertEqual(len(console.spark([-60, -30, 0], -60, 0, 12)), 12)
 
+    def test_volume_nudges_from_live_value_and_is_clamped(self):
+        state = console.State.__new__(console.State)
+        state.volume = None
+        state.live = {"volume": 70}
+        self.assertEqual(state.nudge_volume(-5), 65)
+        self.assertEqual(state.nudge_volume(-5), 60)
+        state.volume = 98
+        self.assertEqual(state.nudge_volume(+5), 100)
+        state.volume = 3
+        self.assertEqual(state.nudge_volume(-5), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
