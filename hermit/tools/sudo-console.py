@@ -119,7 +119,10 @@ class State:
         self.speaker_muted = False
         # Console-requested volume. None until the operator touches -/+ so an
         # idle console never overrides voice commands ("Sudo, volume up").
+        # A request lives until the daemon acknowledges it in live.json or it
+        # expires (see update); it is never pinned indefinitely.
         self.volume: int | None = None
+        self.volume_req_at = 0.0
         self.rms_history: deque[float] = deque(maxlen=240)
         self.ww_history: deque[float] = deque(maxlen=240)
         self.events: list[dict[str, Any]] = []
@@ -136,6 +139,19 @@ class State:
     def update(self) -> None:
         self.live = read_json(LIVE)
         self.events = read_events(EVENTS)
+        # Volume is a REQUEST, not a setting: the moment the daemon reports
+        # the value we asked for, clear it and follow live truth again. Keeping
+        # it pinned forever made the gauge ignore voice commands ("volume 85")
+        # and left a stale volume in control.json that a daemon restart would
+        # re-apply over whatever the user had set by voice since.
+        if self.volume is not None:
+            live_vol = self.live.get("volume")
+            acked = live_vol is not None and int(as_float(live_vol, -1)) == self.volume
+            # Expiry guards the race where a voice command lands in the same
+            # window: after a few daemon polls without an ack, stop insisting.
+            if acked or (time.time() - self.volume_req_at) > 4.0:
+                self.volume = None
+                self.write_control()  # drop the volume key from control.json
         try:
             self.rms_history.append(float(self.live.get("rms", -99.0)))
         except (TypeError, ValueError):
@@ -166,6 +182,7 @@ class State:
         else:
             base = self.volume
         self.volume = max(0, min(100, base + delta))
+        self.volume_req_at = time.time()
         return self.volume
 
     @property

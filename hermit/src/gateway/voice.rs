@@ -236,7 +236,9 @@ async fn apply_console_control(
     // Volume is edge-triggered: only apply when the console's requested value
     // differs from the last one WE applied. Re-asserting every poll would fight
     // voice commands ("Sudo, volume up") that change volume behind our back.
-    // Encoding: 0..=100 = last applied, NONE_SENTINEL = nothing applied yet.
+    // When the console withdraws its request (acknowledged and cleared from
+    // control.json), forget the last value — so the operator can later request
+    // that same number again after a voice change and still be honoured.
     if let Some(v) = ctl.volume {
         let prev = applied_volume.swap(v as u16, Ordering::AcqRel);
         if prev != v as u16
@@ -244,6 +246,8 @@ async fn apply_console_control(
         {
             tracing::warn!(error = %e, volume = v, "console volume change failed");
         }
+    } else {
+        applied_volume.store(u16::MAX, Ordering::Release);
     }
 }
 

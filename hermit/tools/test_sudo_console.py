@@ -104,5 +104,39 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(state.nudge_volume(-5), 0)
 
 
+    def test_volume_request_clears_on_daemon_ack(self):
+        state = console.State.__new__(console.State)
+        state.volume = 42
+        state.volume_req_at = console.time.time()
+        state.mic_muted = False
+        state.speaker_muted = False
+        state.rms_history = console.deque(maxlen=4)
+        state.ww_history = console.deque(maxlen=4)
+        with mock.patch.object(console, "read_json", return_value={"volume": 42}), \
+             mock.patch.object(console, "read_events", return_value=[]), \
+             mock.patch.object(console.State, "write_control") as wc:
+            state.update()
+        self.assertIsNone(state.volume, "ack from live.json must clear the request")
+        wc.assert_called_once()
+
+    def test_volume_request_survives_until_ack_or_expiry(self):
+        state = console.State.__new__(console.State)
+        state.volume = 42
+        state.volume_req_at = console.time.time()
+        state.mic_muted = False
+        state.speaker_muted = False
+        state.rms_history = console.deque(maxlen=4)
+        state.ww_history = console.deque(maxlen=4)
+        with mock.patch.object(console, "read_json", return_value={"volume": 70}), \
+             mock.patch.object(console, "read_events", return_value=[]), \
+             mock.patch.object(console.State, "write_control") as wc:
+            state.update()
+            self.assertEqual(state.volume, 42, "unacked request must persist")
+            state.volume_req_at -= 10  # simulate expiry
+            state.update()
+        self.assertIsNone(state.volume, "expired request must stop insisting")
+        wc.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
