@@ -64,7 +64,7 @@ stations_file = "stations.toml"
 default_volume = 70
 
 [tts]
-provider = "cartesia"                 # "cartesia" | "elevenlabs" | "piper"
+provider = "sarvam"               # "cartesia" | "elevenlabs" | "piper" | "sarvam"
 cartesia_url = "wss://api.cartesia.ai/tts/websocket"
 cartesia_model = "sonic-3"
 cartesia_voice_id = "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"   # Skylar (en-US, public)
@@ -81,6 +81,11 @@ sample_rate = 16000
 piper_binary = "/usr/local/bin/piper"
 piper_voice = "/opt/hermit/config/voices/en_US-lessac-low.onnx"
 connect_timeout_ms = 3000
+sarvam_tts_url = "wss://api.sarvam.ai/text-to-speech/ws"
+# Bulbul v3 wants "od-IN" for Odia; the STT service wants "or-IN" for the SAME
+# language. Sarvam is inconsistent between its own services. Both verified live.
+sarvam_tts_language = "od-IN"
+sarvam_tts_voice = "shubh"         # every spoken word from the device, incl. acks
 
 [stt]
 # "sarvam" — Hindi / Odia / Indian-English. "deepgram" — English only.
@@ -88,7 +93,7 @@ provider = "sarvam"
 
 # --- Sarvam Saaras v3 realtime ---
 sarvam_url = "wss://api.sarvam.ai/speech-to-text-realtime/ws"
-sarvam_language = "auto"        # per-utterance detection: hi / or / en-IN
+sarvam_language = "or-IN"       # Odia-first (STT code; TTS calls it "od-IN")
 sarvam_stream_type = "fast"     # lowest-latency partials for conversational voice
 sarvam_silence_ms = 500         # server VAD pause before finalizing
 max_utterance_ms = 8000

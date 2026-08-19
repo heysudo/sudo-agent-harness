@@ -54,10 +54,14 @@ pub type TextRx = tokio::sync::mpsc::Receiver<String>;
 pub enum Tts {
     Cartesia(CartesiaTts),
     ElevenLabs(ElevenLabsTts),
+    /// Boxed: the held websocket makes this variant ~10x the others.
+    Sarvam(Box<SarvamTts>),
     Piper(PiperTts),
     /// No provider configured — text-only operation.
     Disabled,
 }
+
+pub use crate::speech::tts_sarvam::SarvamTts;
 
 impl Tts {
     /// Build from config + environment. Falls back to Piper, then Disabled, rather
@@ -76,6 +80,13 @@ impl Tts {
                 Some(key) => Tts::ElevenLabs(ElevenLabsTts::new(&cfg.tts, key)),
                 None => {
                     tracing::warn!("ELEVENLABS_API_KEY not set; falling back to Piper");
+                    Self::piper_or_disabled(cfg)
+                }
+            },
+            "sarvam" => match crate::http::secret_opt("SARVAM_API_KEY") {
+                Some(key) => Tts::Sarvam(Box::new(SarvamTts::new(&cfg.tts, key))),
+                None => {
+                    tracing::warn!("SARVAM_API_KEY not set; falling back to Piper");
                     Self::piper_or_disabled(cfg)
                 }
             },
@@ -108,6 +119,7 @@ impl Tts {
         match self {
             Tts::Cartesia(c) => c.prewarm().await,
             Tts::ElevenLabs(e) => e.prewarm().await,
+            Tts::Sarvam(s) => s.prewarm().await,
             _ => {}
         }
     }
@@ -125,6 +137,7 @@ impl Tts {
         match self {
             Tts::Cartesia(c) => c.speak(text_rx, player, generation).await,
             Tts::ElevenLabs(e) => e.speak(text_rx, player, generation).await,
+            Tts::Sarvam(s) => s.speak(text_rx, player, generation).await,
             Tts::Piper(p) => p.speak(text_rx, player, generation).await,
             Tts::Disabled => {
                 // Drain so the producer is not left blocked on a full channel.

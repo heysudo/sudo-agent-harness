@@ -14,12 +14,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const PHRASES: &[&str] = &[
-    "On it.",
-    "Checking.",
-    "One sec — looking that up.",
-    "Let me check.",
-    "Just a moment.",
-    "Looking into it.",
+    "ଠିକ୍ ଅଛି।",
+    "ଦେଖୁଛି।",
+    "ଏକ ମୁହୂର୍ତ୍ତ — ଖୋଜୁଛି।",
+    "ମୁଁ ଦେଖୁଛି।",
+    "ଅପେକ୍ଷା କରନ୍ତୁ।",
+    "ଦେଖିବାକୁ ଚାହୁଁଛି।",
 ];
 
 pub struct AckBank {
@@ -67,15 +67,25 @@ impl AckBank {
             if !tts.is_enabled() {
                 continue;
             }
-            match synthesize(tts, player, phrase).await {
-                Ok(pcm) if !pcm.is_empty() => {
+            // Bound each synthesis. A provider that accepts the connection and then
+            // stalls must not hold the whole device in `activating` — an ack is a
+            // nicety, booting is not. (Sarvam will sit on an idle socket for ~60s
+            // before erroring, which is 6 minutes across the bank.)
+            let built = tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                synthesize(tts, player, phrase),
+            )
+            .await;
+            match built {
+                Ok(Ok(pcm)) if !pcm.is_empty() => {
                     if let Err(e) = save_clip(&path, &pcm) {
                         tracing::warn!(error = %e, "could not cache ack clip");
                     }
                     clips.push(Arc::new(pcm));
                 }
-                Ok(_) => tracing::warn!(phrase, "ack synthesis produced no audio"),
-                Err(e) => tracing::warn!(phrase, error = %e, "ack synthesis failed"),
+                Ok(Ok(_)) => tracing::warn!(phrase, "ack synthesis produced no audio"),
+                Ok(Err(e)) => tracing::warn!(phrase, error = %e, "ack synthesis failed"),
+                Err(_) => tracing::warn!(phrase, "ack synthesis timed out; skipping"),
             }
         }
 

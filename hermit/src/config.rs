@@ -224,6 +224,16 @@ pub struct Tts {
     pub piper_binary: PathBuf,
     pub piper_voice: PathBuf,
     pub connect_timeout_ms: u64,
+    /// Sarvam Bulbul v3 TTS for Hindi / Odia / Indian-English.
+    pub sarvam_tts_url: String,
+    /// TTS language code. NOTE: Bulbul v3 uses "od-IN" for Odia while the STT
+    /// service uses "or-IN" for the same language — Sarvam is inconsistent between
+    /// its own services and each rejects the other's code. Both verified live.
+    /// TTS-supported: od-IN, hi-IN, en-IN, bn-IN, ta-IN, te-IN, kn-IN, ml-IN,
+    /// mr-IN, gu-IN, pa-IN. (as-IN is NOT supported by TTS.)
+    pub sarvam_tts_language: String,
+    /// Bulbul v3 speaker name, lowercase (e.g. "shubh").
+    pub sarvam_tts_voice: String,
 }
 
 impl Default for Tts {
@@ -242,6 +252,9 @@ impl Default for Tts {
             piper_binary: "/usr/local/bin/piper".into(),
             piper_voice: "/opt/hermit/config/voices/en_US-lessac-low.onnx".into(),
             connect_timeout_ms: 3_000,
+            sarvam_tts_url: "wss://api.sarvam.ai/text-to-speech/ws".into(),
+            sarvam_tts_language: "od-IN".into(),
+            sarvam_tts_voice: "shubh".into(),
         }
     }
 }
@@ -265,7 +278,9 @@ pub struct Stt {
     pub provider: String,
     /// Sarvam realtime websocket endpoint.
     pub sarvam_url: String,
-    /// BCP-47 language for Sarvam, or "auto" for per-utterance detection.
+    /// Sarvam language code, or "auto" for per-utterance detection.
+    /// Verified live: auto, hi-IN, or-IN (Odia), en-IN, bn-IN, ta-IN, te-IN,
+    /// kn-IN, ml-IN, mr-IN, gu-IN, pa-IN, as-IN, ur-IN, + 10 more. NOT "od-IN".
     pub sarvam_language: String,
     /// Latency/accuracy tradeoff: "fast" | "balanced" | "simulated".
     pub sarvam_stream_type: String,

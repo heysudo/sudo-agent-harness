@@ -256,9 +256,15 @@ impl Sarvam {
         })
     }
 
+    /// Build the realtime URL.
+    ///
+    /// Parameter names verified against the live API: `language_code` (underscore —
+    /// `language-code` is rejected with a 400), and Odia is `or-IN`, not `od-IN`.
+    /// `vad_silence_duration_ms` shortens the default 1000 ms end-of-turn pause.
     fn connect_url(&self) -> String {
         format!(
-            "{}?language_code={}&stream_type={}&endpointing=vad&silence_duration_ms={}",
+            "{}?model=saaras:v3-realtime&language_code={}&stream_type={}\
+             &vad_silence_duration_ms={}",
             self.url.trim_end_matches('/'),
             urlencoding::encode(&self.language),
             urlencoding::encode(&self.stream_type),
@@ -367,24 +373,51 @@ impl Sarvam {
 
 /// Decode one Sarvam realtime frame into an event.
 ///
-/// Shapes:
-///   `{"event":"transcript.partial","text":"..."}`
-///   `{"event":"transcript.final","text":"..."}`
-///   `{"event":"error","code":N,"is_fatal":bool,"message":"..."}`
-///   `{"event":"vad.speech_start"}` / `{"event":"vad.speech_end"}` — informational only.
+/// Verified against the live API (saaras:v3-realtime). Shapes:
+///   `{"event":"session.begin","config":{...}}` — informational.
+///   `{"event":"vad.speech_start","utterance_idx":0,"confidence":0.97}`
+///   `{"event":"transcript.partial","utterance_idx":0,"text":"..."}`
+///   `{"event":"transcript.final","utterance_idx":0,"text":"..."}`
+///   `{"event":"vad.speech_end","utterance_idx":0}` — the speaker stopped.
+///   `{"event":"error","code":"...","message":"...","is_fatal":bool}`
+///
+/// `vad.speech_end` MUST end the turn: the live API emits it as the last event of
+/// an utterance and a `transcript.final` does not reliably follow. Waiting for one
+/// stalls every turn until the max-utterance ceiling fires.
 pub fn parse_sarvam_event(raw: &str) -> Option<SttEvent> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let text = || {
+        v.get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     match v.get("event").and_then(|e| e.as_str()) {
         Some("transcript.partial") => {
-            let t = v.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
-            if t.is_empty() { None } else { Some(SttEvent::Interim(t.to_string())) }
+            let t = text();
+            if t.is_empty() {
+                None
+            } else {
+                Some(SttEvent::Interim(t))
+            }
         }
         Some("transcript.final") => {
-            let t = v.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
-            if t.is_empty() { None } else { Some(SttEvent::EndOfSpeech(t.to_string())) }
+            let t = text();
+            if t.is_empty() {
+                None
+            } else {
+                Some(SttEvent::Final(t))
+            }
         }
+        // End of utterance. Carries no text of its own; the builder already holds
+        // the best partial/final seen so far.
+        Some("vad.speech_end") => Some(SttEvent::EndOfSpeech(text())),
         Some("error") => {
-            let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("sarvam error");
+            let msg = v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("sarvam error");
             Some(SttEvent::Closed(Some(msg.to_string())))
         }
         _ => None,
@@ -495,6 +528,88 @@ impl TranscriptBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Sarvam realtime: pinned to the live API's observed behaviour ----
+
+    fn sarvam(language: &str) -> Sarvam {
+        Sarvam {
+            url: "wss://api.sarvam.ai/speech-to-text-realtime/ws".into(),
+            api_key: "k".into(),
+            language: language.into(),
+            stream_type: "fast".into(),
+            silence_ms: 500,
+            max_utterance: Duration::from_millis(8_000),
+        }
+    }
+
+    #[test]
+    fn sarvam_url_uses_underscore_language_code() {
+        // The live API rejects `language-code` (hyphen) with a fatal 400:
+        // "Missing required query parameter 'language_code'".
+        let url = sarvam("or-IN").connect_url();
+        assert!(url.contains("language_code=or-IN"), "got {url}");
+        assert!(!url.contains("language-code"), "hyphen form is rejected: {url}");
+        assert!(url.contains("model=saaras:v3-realtime"), "got {url}");
+    }
+
+    #[test]
+    fn sarvam_speech_end_finishes_the_turn() {
+        // The live API ends an utterance with vad.speech_end; a transcript.final
+        // does not reliably follow. Treating this as informational stalls every
+        // turn until the max-utterance ceiling fires.
+        let ev = parse_sarvam_event(r#"{"event":"vad.speech_end","utterance_idx":0}"#);
+        assert!(
+            matches!(ev, Some(SttEvent::EndOfSpeech(_))),
+            "speech_end must end the turn, got {ev:?}"
+        );
+    }
+
+    #[test]
+    fn sarvam_partials_are_interim_and_finals_are_final() {
+        // Real payloads captured from the live socket.
+        assert_eq!(
+            parse_sarvam_event(r#"{"event":"transcript.partial","utterance_idx":0,"text":"ମୋ ନାମ"}"#),
+            Some(SttEvent::Interim("ମୋ ନାମ".into()))
+        );
+        assert_eq!(
+            parse_sarvam_event(r#"{"event":"transcript.final","utterance_idx":0,"text":"ମୋ ନାମ ଅଶୀଷ"}"#),
+            Some(SttEvent::Final("ମୋ ନାମ ଅଶୀଷ".into()))
+        );
+    }
+
+    #[test]
+    fn sarvam_session_begin_and_speech_start_are_not_events() {
+        assert_eq!(parse_sarvam_event(r#"{"event":"session.begin","config":{}}"#), None);
+        assert_eq!(
+            parse_sarvam_event(r#"{"event":"vad.speech_start","confidence":0.97}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn sarvam_fatal_error_closes_with_the_reason() {
+        let raw = r#"{"event":"error","code":"invalid_request","message":"Unsupported language_code 'od-IN'.","is_fatal":true}"#;
+        match parse_sarvam_event(raw) {
+            Some(SttEvent::Closed(Some(m))) => assert!(m.contains("od-IN"), "got {m}"),
+            other => panic!("expected Closed with reason, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn odia_stt_and_tts_use_different_language_codes() {
+        // Sarvam is inconsistent between its own services and each rejects the
+        // other's code. Verified live: STT accepts or-IN and rejects od-IN;
+        // Bulbul v3 TTS accepts od-IN and rejects or-IN.
+        let stt_default = crate::config::Stt::default();
+        let tts_default = crate::config::Tts::default();
+        assert_eq!(tts_default.sarvam_tts_language, "od-IN");
+        assert_ne!(
+            tts_default.sarvam_tts_language, "or-IN",
+            "or-IN is rejected by Bulbul v3"
+        );
+        // The STT side must never inherit the TTS spelling.
+        assert!(stt_default.sarvam_language == "auto" || stt_default.sarvam_language == "or-IN");
+    }
 
     fn results(transcript: &str, is_final: bool, speech_final: bool) -> String {
         serde_json::json!({
