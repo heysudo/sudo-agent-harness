@@ -22,12 +22,11 @@ and a 3 W speaker. It wakes on "Hey Sudo", answers in Hindi, Odia, or English,
 plays All India Radio and Spotify, and remembers what matters — while fitting
 the entire agent, wake word included, in a single 9 MB binary.
 
-```
- mic strip ──FPC──> XVF3800 core board ──USB(UAC2)──> Pi 4 ──> Cerebras / Parallel / Firecrawl
-   (AEC, beamforming, NS,                    ^                        Sarvam / Deepgram
-    dereverb, AGC, VAD, DoA                  │
-    all in hardware @16kHz)                  └── speaker amp ──> DFRobot FIT0502 (3W, 8Ω)
-```
+![HERMIT architecture](docs/architecture.svg)
+
+The shape of the system, in one sentence: hardware does the signal processing,
+one Rust binary does the agent, rented cloud does the intelligence — and
+everything between microphone and speaker streams.
 
 ## Measured performance
 
@@ -53,7 +52,7 @@ first byte in 497 ms p50, the daemon's pooled warm connection in 366 ms.
 | `hermit/src/router.rs` | Regex fast path: pause, volume, named radio — answered in ~1 ms with no LLM call |
 | `hermit/src/orchestrator.rs` | The turn loop, with a *hard* two-round tool cap (schema-starved final round, stray calls dropped) |
 | `hermit/src/memory/` | SQLite + FTS5 (BM25, no embedding model) behind a structural write firewall |
-| `hermit/src/speech/` | Streaming STT/TTS over persistent websockets, sentence chunker, wake word via dlopen'd Porcupine |
+| `hermit/src/speech/` | Streaming STT/TTS over persistent websockets, sentence chunker, and the project's own "Hey Sudo" wake word — a 3-graph ONNX pipeline ported from the Python reference and verified numerically against it |
 | `hermit/src/audio/` | Single-card ALSA path with instant barge-in flush and AEC keepalive |
 | `hermit/src/music/` | mpv IPC for internet radio (232-station Akashvani catalogue) + Spotify via librespot |
 | `hermit/tools/sudo-console.py` | Dependency-free curses operator console: live meters, transcripts, mute leases, volume |
@@ -100,6 +99,11 @@ voice control instead of fighting it.
 
 **No embedding model.** BM25 over FTS5 costs zero RAM and, on a personal
 corpus, retrieves as well as a small embedder would.
+
+**Nothing heavy in the hot path.** No Python or Node between microphone and
+speaker, no PipeWire/PulseAudio (plain ALSA), no Docker on the Pi, no local
+models beyond the wake word, and no compiling on the Pi — its 1 GB is spoken
+for. These are locked positions, not defaults to tune.
 
 ## Operator console
 

@@ -144,11 +144,19 @@ None change the design.
 0. **`cross` is unusable on Apple Silicon.** See "Build and deploy" above; the
    `scripts/build-pi.sh` native-container path replaces it there.
 
-1. **Porcupine has no Rust binding any more.** `pv_porcupine` on crates.io is an empty
-   0.0.0 placeholder, and `Picovoice/porcupine` no longer ships `binding/rust` at all.
-   Porcupine is still the engine; it is bound through its stable five-function C ABI,
-   loaded at runtime with `dlopen`. A missing `.so` degrades to "wake word disabled"
-   instead of a binary that will not boot. See `src/speech/wake.rs`.
+1. **The wake word is the project's own "Hey Sudo" model, not Porcupine.** The
+   trained classifier (`hey_sudo.onnx`, an openWakeWord-style livekit-wakeword
+   model) is ported to Rust in `src/speech/wake_onnx.rs`: three ONNX graphs per
+   2-second window (melspectrogram → embeddings → classifier), verified
+   numerically against the Python reference (0.747 vs 0.753 on the same clip;
+   the delta is 80 ms window alignment, not maths). onnxruntime is `dlopen`'d —
+   a missing `libonnxruntime.so` degrades to "wake word disabled" instead of a
+   binary that will not boot. Two gotchas that cost real time: the classifier
+   needs a full 2.0 s window (shorter clips score 0.0 forever), and scoring
+   must be strided (`SCORE_STRIDE_FRAMES=4`) — per-frame scoring runs 2.5×
+   behind real time on the Pi and the resulting ALSA overruns corrupt all
+   downstream audio. Porcupine survives only as an optional fallback engine in
+   `src/speech/wake.rs`, bound through its five-function C ABI.
 
 2. **Cartesia's `max_buffer_delay_ms` defaults to 3000 ms.** That one field would blow
    the 1.2 s first-audio gate on its own. It is pinned to 0, and `Config::validate`
@@ -192,6 +200,17 @@ the daemon.
 The board already shipped USB firmware, so no flash was needed; a verified image is
 kept in `firmware/` regardless. Its DFU id is `2886:801c` (the wiki says `001a`, which
 is the *normal* mode id here).
+
+Two more field notes that cost real time:
+
+- **Under-voltage looks like everything else.** The Pi originally brown-out
+  cycled (11 `Undervoltage detected!` events in 4 minutes), crashing under
+  load, killing the network, and interrupting a dist-upgrade mid-transaction.
+  `vcgencmd get_throttled` must read `0x0`; anything else, fix power first —
+  the official 5.1 V/3 A PSU — before debugging software.
+- **Never run `speaker-test` without a bound.** It loops forever; an orphaned
+  one kept beeping at the operator long after the SSH session died. Always
+  `timeout N speaker-test ... -l 1`, and `pkill -9 speaker-test` if in doubt.
 
 ## Verification status
 
