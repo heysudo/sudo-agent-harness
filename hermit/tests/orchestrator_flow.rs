@@ -413,9 +413,18 @@ async fn local_harness_overhead_stays_inside_the_fifteen_millisecond_gate() {
     overheads.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p50 = overheads[overheads.len() / 2];
 
+    // Same reasoning as memory::recall_is_under_five_milliseconds: the 15 ms
+    // budget is for the optimized binary, so enforce it in release builds and
+    // keep a blowup ceiling in debug/CI. scripts/bench.sh on the Pi is the
+    // authoritative gate.
+    let gate = if hermit::metrics::strict_latency_gates() {
+        15.0
+    } else {
+        150.0
+    };
     assert!(
-        p50 < 15.0,
-        "local overhead p50 was {p50:.2}ms (recall + assemble); gate is 15ms"
+        p50 < gate,
+        "local overhead p50 was {p50:.2}ms (recall + assemble); gate is {gate}ms"
     );
 }
 

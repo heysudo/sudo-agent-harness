@@ -45,3 +45,12 @@ jobs:
 
       - name: tests
         run: cargo test
+
+      # The strict latency gates (recall p50 < 5ms, harness overhead < 15ms)
+      # describe the OPTIMIZED binary. Under `cargo test` they relax to blowup
+      # ceilings, because a debug build on a shared runner measures the runner
+      # (it failed at 5.47ms against the 5ms gate while the code was fine).
+      # Release mode is where those budgets mean something, so enforce them
+      # here. scripts/bench.sh on real hardware remains authoritative.
+      - name: tests (release — enforces the real latency budgets)
+        run: cargo test --release
