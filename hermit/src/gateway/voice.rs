@@ -17,7 +17,7 @@ use super::Gateway;
 use crate::speech::earcons::Earcons;
 use crate::speech::stt::{Deepgram, Sarvam, SttEvent, SttSession, TranscriptBuilder};
 use crate::speech::wake::{FrameFeeder, WakeDetector};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -91,6 +91,8 @@ pub async fn run(
     let mut feeder = FrameFeeder::new(detector);
     let listening = Arc::new(AtomicBool::new(false));
     let speaker_muted = Arc::new(AtomicBool::new(false));
+    // Last console-applied volume; u16 so u8::MAX+1 can mean "none applied yet".
+    let console_volume = Arc::new(AtomicU16::new(u16::MAX));
     // Console telemetry + control (sudo-console). All throttled internally.
     let state = Arc::new(Mutex::new(crate::state_io::StateWriter::new()));
     // UI sounds (b2-34 earcons): instant wake ack + end-of-speech "working on it".
@@ -109,12 +111,16 @@ pub async fn run(
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .read_control();
-                    apply_console_control(&gateway, ctl, &speaker_muted).await;
+                    apply_console_control(&gateway, ctl, &speaker_muted, &console_volume).await;
+                    // Published so the console's volume gauge shows the daemon's
+                    // actual value (voice commands change it behind our back).
+                    let vol = gateway.music.volume().await;
                     let mut state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
                     if ctl.mic_muted {
                         state_guard.write_live(serde_json::json!({
                             "ww": null, "rms": -99.0, "listening": false,
                             "mic_muted": true, "speaker_muted": ctl.speaker_muted,
+                            "volume": vol,
                         }));
                         continue;
                     }
@@ -129,6 +135,7 @@ pub async fn run(
                         "ww": score, "ww_threshold": threshold,
                         "rms": frame_dbfs(&samples), "listening": false,
                         "mic_muted": false, "speaker_muted": ctl.speaker_muted,
+                        "volume": vol,
                     }));
                     if hit {
                         feeder.reset();
@@ -178,6 +185,7 @@ pub async fn run(
         let ec = earcons.clone();
         let turn_state = state.clone();
         let turn_speaker_muted = speaker_muted.clone();
+        let turn_console_volume = console_volume.clone();
         // 128 x 20 ms = ~2.5 s of audio, comfortably covering the Deepgram
         // handshake so early speech is not lost while the socket opens.
         let (utt_tx, utt_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(128);
@@ -200,6 +208,7 @@ pub async fn run(
             &state,
             &gateway,
             &turn_speaker_muted,
+            &turn_console_volume,
         )
         .await;
         let _ = handle.await;
@@ -214,6 +223,7 @@ async fn apply_console_control(
     gateway: &Gateway,
     ctl: crate::state_io::Control,
     applied_speaker_mute: &AtomicBool,
+    applied_volume: &AtomicU16,
 ) {
     gateway.player.set_muted(ctl.speaker_muted);
     let previous = applied_speaker_mute.swap(ctl.speaker_muted, Ordering::AcqRel);
@@ -222,6 +232,18 @@ async fn apply_console_control(
             let _ = gateway.player.flush().await;
         }
         gateway.music.set_muted(ctl.speaker_muted).await;
+    }
+    // Volume is edge-triggered: only apply when the console's requested value
+    // differs from the last one WE applied. Re-asserting every poll would fight
+    // voice commands ("Sudo, volume up") that change volume behind our back.
+    // Encoding: 0..=100 = last applied, NONE_SENTINEL = nothing applied yet.
+    if let Some(v) = ctl.volume {
+        let prev = applied_volume.swap(v as u16, Ordering::AcqRel);
+        if prev != v as u16
+            && let Err(e) = gateway.music.set_volume(v).await
+        {
+            tracing::warn!(error = %e, volume = v, "console volume change failed");
+        }
     }
 }
 
@@ -232,6 +254,7 @@ async fn forward_until_done(
     state: &Arc<Mutex<crate::state_io::StateWriter>>,
     gateway: &Gateway,
     applied_speaker_mute: &AtomicBool,
+    applied_volume: &AtomicU16,
 ) {
     while listening.load(Ordering::Acquire) {
         match tokio::time::timeout(Duration::from_millis(100), mic_rx.recv()).await {
@@ -247,7 +270,7 @@ async fn forward_until_done(
                     }));
                     ctl
                 };
-                apply_console_control(gateway, ctl, applied_speaker_mute).await;
+                apply_console_control(gateway, ctl, applied_speaker_mute, applied_volume).await;
                 if ctl.mic_muted {
                     continue;
                 }

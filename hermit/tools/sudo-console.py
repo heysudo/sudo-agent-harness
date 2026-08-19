@@ -117,6 +117,9 @@ class State:
     def __init__(self) -> None:
         self.mic_muted = False
         self.speaker_muted = False
+        # Console-requested volume. None until the operator touches -/+ so an
+        # idle console never overrides voice commands ("Sudo, volume up").
+        self.volume: int | None = None
         self.rms_history: deque[float] = deque(maxlen=240)
         self.ww_history: deque[float] = deque(maxlen=240)
         self.events: list[dict[str, Any]] = []
@@ -144,19 +147,26 @@ class State:
 
     def write_control(self) -> None:
         CONTROL.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, Any] = {
+            "ts": time.time(),
+            "mic_muted": self.mic_muted,
+            "speaker_muted": self.speaker_muted,
+        }
+        if self.volume is not None:
+            payload["volume"] = self.volume
         tmp = CONTROL.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(
-                {
-                    "ts": time.time(),
-                    "mic_muted": self.mic_muted,
-                    "speaker_muted": self.speaker_muted,
-                },
-                separators=(",", ":"),
-            )
-        )
+        tmp.write_text(json.dumps(payload, separators=(",", ":")))
         os.chmod(tmp, 0o660)
         os.replace(tmp, CONTROL)
+
+    def nudge_volume(self, delta: int) -> int:
+        """Adjust requested volume from the daemon's live value on first touch."""
+        if self.volume is None:
+            base = int(as_float(self.live.get("volume"), 70.0))
+        else:
+            base = self.volume
+        self.volume = max(0, min(100, base + delta))
+        return self.volume
 
     @property
     def alive(self) -> bool:
@@ -196,74 +206,103 @@ def wrapped_event_lines(events: list[dict[str, Any]], width: int, limit: int) ->
     return lines[-limit:]
 
 
+def hline(screen: Any, y: int, w: int, label: str = "", attr: int = 0) -> None:
+    """One horizontal rule, optionally with a section label set into it."""
+    line = "─" * max(0, w - 1)
+    safe_add(screen, y, 0, line, curses.A_DIM)
+    if label:
+        safe_add(screen, y, 2, f" {label} ", attr | curses.A_BOLD)
+
+
 def draw(screen: Any, state: State, status: str, pending: tuple[str, float] | None) -> None:
     screen.erase()
     h, w = screen.getmaxyx()
-    if h < 16 or w < 50:
-        safe_add(screen, 0, 0, "sudo-console needs at least 50x16", curses.A_BOLD)
+    if h < 20 or w < 60:
+        safe_add(screen, 0, 0, "sudo-console needs at least 60x20", curses.A_BOLD)
         safe_add(screen, 2, 0, "Resize terminal; q quits.")
         screen.refresh()
         return
 
+    dim = curses.A_DIM
+    cyan = curses.color_pair(3)
+    yellow = curses.color_pair(4)
+
+    # ── row 0: title bar ────────────────────────────────────────────────
     alive_attr = curses.color_pair(2) | curses.A_BOLD if state.alive else curses.color_pair(1) | curses.A_BOLD
     safe_add(screen, 0, 0, " SUDO / HERMIT CONSOLE ", curses.A_REVERSE | curses.A_BOLD)
-    safe_add(screen, 0, max(25, w - 28), "● LIVE" if state.alive else "● DEAD / STALE", alive_attr)
-    safe_add(
-        screen,
-        2,
-        0,
-        f"[m] mic {'MUTED' if state.mic_muted else 'open ':5}   "
-        f"[s] speaker {'MUTED' if state.speaker_muted else 'open ':5}   "
-        "[r] restart HERMIT  [b] reboot  [p] poweroff  [q] quit",
-        curses.A_BOLD,
-    )
+    live_tag = "● LIVE" if state.alive else "● DEAD / STALE"
+    safe_add(screen, 0, max(25, w - len(live_tag) - 2), live_tag, alive_attr)
 
-    graph_w = max(10, w - 18)
+    # ── controls ────────────────────────────────────────────────────────
+    hline(screen, 1, w, "CONTROLS")
+    mic = "MUTED" if state.mic_muted else "open"
+    spk = "MUTED" if state.speaker_muted else "open"
+    mic_attr = curses.color_pair(1) | curses.A_BOLD if state.mic_muted else curses.A_BOLD
+    spk_attr = curses.color_pair(1) | curses.A_BOLD if state.speaker_muted else curses.A_BOLD
+    safe_add(screen, 2, 2, f"[m] mic {mic:5}", mic_attr)
+    safe_add(screen, 2, 19, f"[s] speaker {spk:5}", spk_attr)
+    safe_add(screen, 2, 40, "[-/+] volume", curses.A_BOLD)
+    safe_add(screen, 3, 2, "[r] restart HERMIT   [b] reboot   [p] poweroff   [q] quit", dim)
+
+    # ── audio meters ────────────────────────────────────────────────────
+    hline(screen, 4, w, "AUDIO")
+    label_w = 18
+    graph_w = max(10, w - label_w - 2)
     rms = as_float(state.live.get("rms"), -99.0)
-    safe_add(screen, 4, 0, f"MIC  {rms:6.1f} dBFS ", curses.A_BOLD)
-    safe_add(screen, 4, 17, bar(rms, -60, 0, graph_w), curses.color_pair(3))
-    safe_add(screen, 5, 17, spark(list(state.rms_history), -60, 0, graph_w), curses.color_pair(3))
+    safe_add(screen, 5, 2, f"MIC  {rms:6.1f} dBFS", curses.A_BOLD)
+    safe_add(screen, 5, label_w, bar(rms, -60, 0, graph_w), cyan)
+    safe_add(screen, 6, label_w, spark(list(state.rms_history), -60, 0, graph_w), cyan | dim)
 
     ww = as_float(state.live.get("ww"), 0.0)
     threshold = as_float(state.live.get("ww_threshold"), 0.5) or 0.5
     listening = bool(state.live.get("listening", False))
-    safe_add(
-        screen,
-        7,
-        0,
-        f"WAKE {ww:6.3f}/{threshold:.3f} " + ("LISTENING" if listening else "waiting  "),
-        curses.A_BOLD,
-    )
-    safe_add(screen, 7, 25, bar(ww, 0, max(threshold * 1.5, 1e-3), max(10, w - 26)), curses.color_pair(4))
-    safe_add(screen, 8, 25, spark(list(state.ww_history), 0, max(threshold * 1.5, 1e-3), max(10, w - 26)), curses.color_pair(4))
+    wake_tag = "LISTENING" if listening else "waiting"
+    safe_add(screen, 7, 2, f"WAKE {ww:5.3f}/{threshold:.3f}", curses.A_BOLD)
+    safe_add(screen, 7, label_w, bar(ww, 0, max(threshold * 1.5, 1e-3), graph_w), yellow)
+    safe_add(screen, 8, label_w, spark(list(state.ww_history), 0, max(threshold * 1.5, 1e-3), graph_w), yellow | dim)
+    safe_add(screen, 8, 2, wake_tag, yellow | curses.A_BOLD if listening else dim)
+
+    # Volume gauge: pending console request wins the display; live value else.
+    live_vol = state.live.get("volume")
+    vol = state.volume if state.volume is not None else (int(as_float(live_vol, -1)) if live_vol is not None else None)
+    if vol is None:
+        safe_add(screen, 9, 2, "VOL    n/a", curses.A_BOLD)
+        safe_add(screen, 9, label_w, "░" * graph_w, dim)
+    else:
+        tag = "*" if state.volume is not None and (live_vol is None or int(as_float(live_vol, -1)) != state.volume) else " "
+        safe_add(screen, 9, 2, f"VOL  {vol:5d}%{tag}", curses.A_BOLD)
+        safe_add(screen, 9, label_w, bar(float(vol), 0, 100, graph_w), curses.color_pair(2))
 
     interim = str(state.live.get("transcript_interim", "") or "")
     if interim:
-        safe_add(screen, 9, 0, "HEARING: " + interim, curses.color_pair(4) | curses.A_BOLD)
+        safe_add(screen, 10, 2, "HEARING: " + interim, yellow | curses.A_BOLD)
 
+    # ── conversation / activity ─────────────────────────────────────────
     convo_top = 11
     activity_height = 4
     footer_rows = 2
-    convo_height = max(3, h - convo_top - activity_height - footer_rows - 2)
-    safe_add(screen, convo_top, 0, "CONVERSATION", curses.A_UNDERLINE | curses.A_BOLD)
-    convo_lines = wrapped_event_lines(state.conversation, w - 2, convo_height)
+    convo_height = max(3, h - convo_top - activity_height - footer_rows - 3)
+    hline(screen, convo_top, w, "CONVERSATION")
+    convo_lines = wrapped_event_lines(state.conversation, w - 4, convo_height)
     for idx, line in enumerate(convo_lines):
-        attr = curses.color_pair(3) if "SUDO" in line else 0
-        safe_add(screen, convo_top + 1 + idx, 0, line, attr)
+        attr = cyan if "SUDO" in line else 0
+        safe_add(screen, convo_top + 1 + idx, 2, line, attr)
 
     activity_top = convo_top + 1 + convo_height
-    safe_add(screen, activity_top, 0, "ACTIVITY", curses.A_UNDERLINE | curses.A_BOLD)
-    for idx, line in enumerate(wrapped_event_lines(state.activity, w - 2, activity_height)):
-        safe_add(screen, activity_top + 1 + idx, 0, line)
+    hline(screen, activity_top, w, "ACTIVITY")
+    for idx, line in enumerate(wrapped_event_lines(state.activity, w - 4, activity_height)):
+        safe_add(screen, activity_top + 1 + idx, 2, line, dim)
 
+    # ── footer ──────────────────────────────────────────────────────────
+    hline(screen, h - 2, w)
     if pending and time.monotonic() < pending[1]:
         action = pending[0].replace("service-restart", "restart HERMIT")
         footer = f"Confirm {action}? [y] yes  [n/esc] cancel"
         attr = curses.color_pair(1) | curses.A_BOLD
     else:
         footer = status or f"state: {STATE_DIR}"
-        attr = curses.A_DIM
-    safe_add(screen, h - 1, 0, footer, attr)
+        attr = dim
+    safe_add(screen, h - 1, 2, footer, attr)
     screen.refresh()
 
 
@@ -313,6 +352,12 @@ def tui(screen: Any) -> None:
             state.speaker_muted = not state.speaker_muted
             state.write_control()
             status = "speaker muted" if state.speaker_muted else "speaker enabled"
+        elif key in (ord("-"), ord("_"), curses.KEY_DOWN):
+            status = f"volume {state.nudge_volume(-5)}%"
+            state.write_control()
+        elif key in (ord("+"), ord("="), curses.KEY_UP):
+            status = f"volume {state.nudge_volume(+5)}%"
+            state.write_control()
         elif key == ord("r"):
             pending = ("service-restart", time.monotonic() + 8)
         elif key == ord("b"):

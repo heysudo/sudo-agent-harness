@@ -46,11 +46,17 @@ pub struct StateWriter {
     enabled: bool,
 }
 
-/// Console overrides. Default = nothing muted.
+/// Console overrides. Default = nothing muted, no volume request.
+///
+/// Mutes are a LEASE: they expire with the control file's TTL so a crashed
+/// console can never leave the device silent. `volume` is a COMMAND: the
+/// daemon applies it once per change and it persists after the console exits
+/// (snapping volume back on quit would surprise the operator).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Control {
     pub mic_muted: bool,
     pub speaker_muted: bool,
+    pub volume: Option<u8>,
 }
 
 impl StateWriter {
@@ -167,6 +173,10 @@ impl StateWriter {
                             .get("speaker_muted")
                             .and_then(|x| x.as_bool())
                             .unwrap_or(false),
+                        volume: v
+                            .get("volume")
+                            .and_then(|x| x.as_u64())
+                            .map(|x| x.min(100) as u8),
                     })
                 })
                 .unwrap_or_default();
@@ -246,6 +256,22 @@ mod tests {
         .unwrap();
         w.ctl_next = Instant::now(); // bypass throttle for the test
         assert!(w.read_control().mic_muted);
+        // Volume: absent => None, present => clamped to 100.
+        assert_eq!(w.read_control().volume, None, "no volume key => None");
+        std::fs::write(
+            dir.path().join("control.json"),
+            format!(
+                r#"{{"ts":{},"mic_muted":false,"speaker_muted":false,"volume":140}}"#,
+                now_ts()
+            ),
+        )
+        .unwrap();
+        w.ctl_next = Instant::now();
+        assert_eq!(
+            w.read_control().volume,
+            Some(100),
+            "volume above 100 clamps"
+        );
         std::fs::write(
             dir.path().join("control.json"),
             r#"{"ts":1,"mic_muted":true,"speaker_muted":true}"#,
