@@ -286,6 +286,11 @@ pub struct Stt {
     pub sarvam_stream_type: String,
     /// Server-side VAD silence before finalizing an utterance (ms).
     pub sarvam_silence_ms: u32,
+    /// Server-side VAD sensitivity (0..1, lower = more sensitive). The
+    /// default 0.3 misses quiet beamformed mic audio; 0.15 catches it.
+    pub sarvam_vad_threshold: f32,
+    /// Software gain on mic samples before upload (XVF3800 output is quiet).
+    pub sarvam_gain: f32,
 }
 
 impl Default for Stt {
@@ -303,6 +308,8 @@ impl Default for Stt {
             sarvam_language: "auto".into(),
             sarvam_stream_type: "fast".into(),
             sarvam_silence_ms: 500,
+            sarvam_vad_threshold: 0.15,
+            sarvam_gain: 8.0,
         }
     }
 }

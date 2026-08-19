@@ -240,6 +240,11 @@ pub struct Sarvam {
     language: String,
     stream_type: String,
     silence_ms: u32,
+    vad_threshold: f32,
+    /// Software gain applied to mic samples before upload. The XVF3800's
+    /// processed output is quiet (~-35 dBFS speech); Sarvam's VAD won't call
+    /// that speech, while boosted audio transcribes reliably. Verified live.
+    gain: f32,
     max_utterance: Duration,
 }
 
@@ -252,23 +257,27 @@ impl Sarvam {
             language: cfg.sarvam_language.clone(),
             stream_type: cfg.sarvam_stream_type.clone(),
             silence_ms: cfg.sarvam_silence_ms,
+            vad_threshold: cfg.sarvam_vad_threshold,
+            gain: cfg.sarvam_gain,
             max_utterance: Duration::from_millis(cfg.max_utterance_ms),
         })
     }
 
     /// Build the realtime URL.
     ///
-    /// Parameter names verified against the live API: `language_code` (underscore —
-    /// `language-code` is rejected with a 400), and Odia is `or-IN`, not `od-IN`.
-    /// `vad_silence_duration_ms` shortens the default 1000 ms end-of-turn pause.
+    /// Parameter names verified against the live API's `session.begin` echo:
+    /// `language_code` (underscore), `threshold` (VAD sensitivity), and
+    /// `silence_duration_ms` (end-of-turn pause). Odia is `or-IN` here even
+    /// though TTS calls it `od-IN`.
     fn connect_url(&self) -> String {
         format!(
             "{}?model=saaras:v3-realtime&language_code={}&stream_type={}\
-             &vad_silence_duration_ms={}",
+             &silence_duration_ms={}&threshold={}",
             self.url.trim_end_matches('/'),
             urlencoding::encode(&self.language),
             urlencoding::encode(&self.stream_type),
             self.silence_ms,
+            self.vad_threshold,
         )
     }
 
@@ -297,6 +306,7 @@ impl Sarvam {
         let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(32);
         let (event_tx, event_rx) = tokio::sync::mpsc::channel::<SttEvent>(32);
         let max_utterance = self.max_utterance;
+        let gain = self.gain;
 
         tokio::spawn(async move {
             let (mut sink, mut stream) = ws.split();
@@ -335,10 +345,13 @@ impl Sarvam {
                     chunk = audio_rx.recv(), if audio_open => {
                         match chunk {
                             Some(samples) => {
-                                // linear16 mono → base64 JSON frame
+                                // linear16 mono → gain → base64 JSON frame
                                 let mut bytes = Vec::with_capacity(samples.len() * 2);
                                 for s in samples {
-                                    bytes.extend_from_slice(&s.to_le_bytes());
+                                    let boosted = ((s as f32) * gain)
+                                        .clamp(i16::MIN as f32, i16::MAX as f32)
+                                        as i16;
+                                    bytes.extend_from_slice(&boosted.to_le_bytes());
                                 }
                                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                                 let frame = serde_json::json!({"event":"audio_input","audio":b64}).to_string();
@@ -538,8 +551,22 @@ mod tests {
             language: language.into(),
             stream_type: "fast".into(),
             silence_ms: 500,
+            vad_threshold: 0.15,
+            gain: 8.0,
             max_utterance: Duration::from_millis(8_000),
         }
+    }
+
+    #[test]
+    fn sarvam_url_carries_vad_tuning() {
+        // Live finding: the default VAD threshold (0.3) never fired on real
+        // wake-word turns from the XVF3800 — 8s of speech produced zero
+        // events and every turn died at the ceiling. `threshold` and
+        // `silence_duration_ms` are the names the session.begin echo confirms.
+        let url = sarvam("or-IN").connect_url();
+        assert!(url.contains("threshold=0.15"), "got {url}");
+        assert!(url.contains("silence_duration_ms=500"), "got {url}");
+        assert!(!url.contains("vad_silence_duration_ms"), "wrong param name: {url}");
     }
 
     #[test]

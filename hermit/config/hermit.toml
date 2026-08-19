@@ -97,6 +97,8 @@ sarvam_url = "wss://api.sarvam.ai/speech-to-text-realtime/ws"
 sarvam_language = "or-IN"       # Odia-first (STT code; TTS calls it "od-IN")
 sarvam_stream_type = "fast"     # lowest-latency partials for conversational voice
 sarvam_silence_ms = 500         # server VAD pause before finalizing
+sarvam_vad_threshold = 0.15     # default 0.3 misses the XVF3800's quiet output
+sarvam_gain = 8.0               # software boost: ~-35 dBFS speech -> ~-17 dBFS
 max_utterance_ms = 8000
 
 # --- Deepgram (fallback; set provider = "deepgram" to switch back) ---
