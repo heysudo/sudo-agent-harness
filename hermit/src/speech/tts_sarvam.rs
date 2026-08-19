@@ -147,6 +147,7 @@ impl SarvamTts {
         // (already mapped to TTS codes by the caller); fall back to the
         // configured default voice language.
         let lang = lang_override.unwrap_or(&self.language_code);
+        let mut text_rx = text_rx;
         let mut guard = self.conn.lock().await;
         // Reuse a warm socket only if it was used moments ago; Sarvam
         // idle-closes them and a dead socket downgrades the turn to silence.
@@ -154,20 +155,59 @@ impl SarvamTts {
             Some((ws, last)) if last.elapsed() < Duration::from_secs(30) => ws,
             _ => self.connect().await?,
         };
-
         drop(guard);
+
+        // Everything sent is recorded so a dead socket costs a redial, not the
+        // turn. Two failure shapes, both observed live within one minute:
+        //   1. Sarvam closed the socket but TCP writes still "succeed" locally —
+        //      config/text/flush all send, the first read returns Close, and the
+        //      utterance ends Ok with ZERO audio (the silent turn).
+        //   2. The write itself fails ("sending sarvam tts config") because the
+        //      corpse was re-warmed by an earlier silent turn.
+        let mut spoken: Vec<String> = Vec::new();
         let result = self
-            .stream_utterance(&mut ws, text_rx, player, generation, lang)
+            .stream_utterance(&mut ws, &mut text_rx, player, generation, lang, &[], &mut spoken)
             .await;
 
-        match result {
-            Ok(r) => {
-                // Socket survived the utterance — keep it warm for the next one.
-                *self.conn.lock().await = Some((ws, Instant::now()));
-                Ok(r)
+        let silent_close = matches!(
+            &result,
+            Ok(r) if r.samples == 0 && !r.interrupted && !spoken.is_empty()
+        );
+        if result.is_ok() && !silent_close {
+            let r = result.unwrap();
+            // Re-warm ONLY a socket that proved itself: it either produced audio
+            // or had nothing to say. A zero-audio socket is a corpse; caching it
+            // converts one failure into two.
+            *self.conn.lock().await = Some((ws, Instant::now()));
+            return Ok(r);
+        }
+        if let Err(e) = &result {
+            tracing::warn!(error = %e, "sarvam tts utterance failed; redialing and replaying");
+        } else {
+            tracing::warn!("sarvam tts closed without audio; redialing and replaying the utterance");
+        }
+
+        // One retry on a guaranteed-fresh socket, replaying what was already
+        // consumed from the channel, then continuing with whatever remains.
+        let retry = async {
+            let mut ws2 = self.connect().await?;
+            let mut replay_log: Vec<String> = Vec::new();
+            let replay = std::mem::take(&mut spoken);
+            let r = self
+                .stream_utterance(&mut ws2, &mut text_rx, player, generation, lang, &replay, &mut replay_log)
+                .await?;
+            if r.samples > 0 {
+                *self.conn.lock().await = Some((ws2, Instant::now()));
             }
+            Ok::<SpeakResult, anyhow::Error>(r)
+        }
+        .await;
+
+        match retry {
+            Ok(r) => Ok(r),
             Err(e) => {
-                tracing::warn!(error = %e, "sarvam tts utterance failed; dropping connection");
+                // Unwedge the producer before surfacing the failure.
+                while text_rx.recv().await.is_some() {}
                 Err(e)
             }
         }
@@ -180,13 +220,20 @@ impl SarvamTts {
     /// then nothing ("Websocket was left open without any messages for too long"),
     /// and a `biased` select that always polls the socket first starves the text
     /// channel into exactly that state.
+    ///
+    /// `replay` is text already consumed from the channel by a previous failed
+    /// attempt; it is sent first. Every text chunk sent is appended to `sent_log`
+    /// so the caller can replay it if THIS attempt dies too.
+    #[allow(clippy::too_many_arguments)]
     async fn stream_utterance(
         &self,
         ws: &mut WsStream,
-        mut text_rx: TextRx,
+        text_rx: &mut TextRx,
         player: &AudioPlayer,
         generation: u64,
         language_code: &str,
+        replay: &[String],
+        sent_log: &mut Vec<String>,
     ) -> Result<SpeakResult> {
         let mut result = SpeakResult::default();
         let started = Instant::now();
@@ -196,6 +243,19 @@ impl SarvamTts {
         ws.send(Message::Text(self.config_frame(language_code).into()))
             .await
             .context("sending sarvam tts config")?;
+
+        for text in replay {
+            let frame = serde_json::json!({
+                "type": "text",
+                "data": { "text": text },
+            })
+            .to_string();
+            ws.send(Message::Text(frame.into()))
+                .await
+                .context("replaying sarvam tts text")?;
+            sent_log.push(text.clone());
+            sent_any_text = true;
+        }
 
         loop {
             if player.is_stale(generation) {
@@ -217,6 +277,7 @@ impl SarvamTts {
                             ws.send(Message::Text(frame.into()))
                                 .await
                                 .context("sending sarvam tts text")?;
+                            sent_log.push(text);
                             sent_any_text = true;
                         }
                         Some(_) => {}
@@ -270,8 +331,12 @@ impl SarvamTts {
             }
         }
 
-        // Drain any remaining text so the producer is never wedged on a full channel.
-        while text_rx.recv().await.is_some() {}
+        // Drain any remaining text ONLY on success or interruption; a failed
+        // attempt leaves the channel intact so the caller's retry can finish
+        // the utterance instead of losing the tail.
+        if result.finished || result.interrupted || result.samples > 0 || sent_log.is_empty() {
+            while text_rx.recv().await.is_some() {}
+        }
         Ok(result)
     }
 }
