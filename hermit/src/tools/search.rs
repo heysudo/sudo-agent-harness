@@ -96,7 +96,10 @@ impl SearchClient {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            bail!("parallel search returned {status}: {}", crate::tools::clip(&text, 300));
+            bail!(
+                "parallel search returned {status}: {}",
+                crate::tools::clip(&text, 300)
+            );
         }
 
         let parsed: SearchResponse =
@@ -121,7 +124,11 @@ impl SearchClient {
         if self.mode != "turbo" {
             return &self.mode;
         }
-        if script_is_turbo_supported(query) { &self.mode } else { &self.fallback_mode }
+        if script_is_turbo_supported(query) {
+            &self.mode
+        } else {
+            &self.fallback_mode
+        }
     }
 }
 
@@ -154,7 +161,9 @@ pub fn script_is_turbo_supported(s: &str) -> bool {
         return false;
     }
     // Han characters with no kana are most likely Chinese → use the fallback.
-    let has_han = s.chars().any(|c| matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF));
+    let has_han = s
+        .chars()
+        .any(|c| matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF));
     if has_han && !has_kana {
         return false;
     }
@@ -169,7 +178,11 @@ pub fn format_for_model(resp: &SearchResponse, max_results: usize) -> String {
     }
     let mut out = String::new();
     for (i, r) in resp.results.iter().take(max_results).enumerate() {
-        out.push_str(&format!("[{}] {}\n", i + 1, r.title.as_deref().unwrap_or(&r.url)));
+        out.push_str(&format!(
+            "[{}] {}\n",
+            i + 1,
+            r.title.as_deref().unwrap_or(&r.url)
+        ));
         out.push_str(&format!("url: {}\n", r.url));
         if let Some(d) = &r.publish_date {
             out.push_str(&format!("date: {d}\n"));
@@ -210,7 +223,11 @@ mod tests {
     fn english_and_japanese_use_turbo() {
         let c = client("turbo", "basic");
         assert_eq!(c.mode_for("what is the tide in Bergen"), "turbo");
-        assert_eq!(c.mode_for("東京の天気はどうですか"), "turbo", "kana marks Japanese");
+        assert_eq!(
+            c.mode_for("東京の天気はどうですか"),
+            "turbo",
+            "kana marks Japanese"
+        );
         assert_eq!(c.mode_for("ソニックの最新ニュース"), "turbo");
     }
 
@@ -220,7 +237,11 @@ mod tests {
         assert_eq!(c.mode_for("какая погода в Москве"), "basic", "Cyrillic");
         assert_eq!(c.mode_for("서울 날씨"), "basic", "Hangul");
         assert_eq!(c.mode_for("طقس اليوم"), "basic", "Arabic");
-        assert_eq!(c.mode_for("北京的天气"), "basic", "Han without kana => Chinese");
+        assert_eq!(
+            c.mode_for("北京的天气"),
+            "basic",
+            "Han without kana => Chinese"
+        );
     }
 
     #[test]
@@ -248,7 +269,10 @@ mod tests {
 
     #[test]
     fn empty_results_say_so_rather_than_returning_blank() {
-        assert_eq!(format_for_model(&SearchResponse::default(), 5), "No results.");
+        assert_eq!(
+            format_for_model(&SearchResponse::default(), 5),
+            "No results."
+        );
     }
 
     #[test]

@@ -95,13 +95,11 @@ impl SarvamTts {
                 .context("invalid SARVAM_API_KEY")?,
         );
 
-        let (ws, _) = tokio::time::timeout(
-            self.connect_timeout,
-            tokio_tungstenite::connect_async(req),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("sarvam tts connect timed out"))?
-        .context("connecting to sarvam tts websocket")?;
+        let (ws, _) =
+            tokio::time::timeout(self.connect_timeout, tokio_tungstenite::connect_async(req))
+                .await
+                .map_err(|_| anyhow::anyhow!("sarvam tts connect timed out"))?
+                .context("connecting to sarvam tts websocket")?;
         tracing::info!(language = %self.language_code, speaker = %self.speaker, "sarvam tts connected");
         Ok(ws)
     }
@@ -166,15 +164,22 @@ impl SarvamTts {
         //      corpse was re-warmed by an earlier silent turn.
         let mut spoken: Vec<String> = Vec::new();
         let result = self
-            .stream_utterance(&mut ws, &mut text_rx, player, generation, lang, &[], &mut spoken)
+            .stream_utterance(
+                &mut ws,
+                &mut text_rx,
+                player,
+                generation,
+                lang,
+                &[],
+                &mut spoken,
+            )
             .await;
 
         let silent_close = matches!(
             &result,
             Ok(r) if r.samples == 0 && !r.interrupted && !spoken.is_empty()
         );
-        if result.is_ok() && !silent_close {
-            let r = result.unwrap();
+        if !silent_close && let Ok(r) = result {
             // Re-warm ONLY a socket that proved itself: it either produced audio
             // or had nothing to say. A zero-audio socket is a corpse; caching it
             // converts one failure into two.
@@ -184,7 +189,9 @@ impl SarvamTts {
         if let Err(e) = &result {
             tracing::warn!(error = %e, "sarvam tts utterance failed; redialing and replaying");
         } else {
-            tracing::warn!("sarvam tts closed without audio; redialing and replaying the utterance");
+            tracing::warn!(
+                "sarvam tts closed without audio; redialing and replaying the utterance"
+            );
         }
 
         // One retry on a guaranteed-fresh socket, replaying what was already
@@ -194,7 +201,15 @@ impl SarvamTts {
             let mut replay_log: Vec<String> = Vec::new();
             let replay = std::mem::take(&mut spoken);
             let r = self
-                .stream_utterance(&mut ws2, &mut text_rx, player, generation, lang, &replay, &mut replay_log)
+                .stream_utterance(
+                    &mut ws2,
+                    &mut text_rx,
+                    player,
+                    generation,
+                    lang,
+                    &replay,
+                    &mut replay_log,
+                )
                 .await?;
             if r.samples > 0 {
                 *self.conn.lock().await = Some((ws2, Instant::now()));
@@ -439,7 +454,11 @@ mod tests {
     fn final_event_frame_ends_the_utterance() {
         // The live completion frame — not "done"/"complete", which the docs imply.
         let raw = r#"{"type":"event","data":{"event_type":"final"}}"#;
-        assert!(matches!(parse_tts_frame(raw), TtsFrame::Done), "got {:?}", parse_tts_frame(raw));
+        assert!(
+            matches!(parse_tts_frame(raw), TtsFrame::Done),
+            "got {:?}",
+            parse_tts_frame(raw)
+        );
     }
 
     #[test]

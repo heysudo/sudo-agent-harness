@@ -31,8 +31,7 @@ user-facing doc. This file is the engineering log.
 
 ## The target device
 
-`<pi-host>` @ `<redacted-lan-ip>`, user `<pi-host>`, SSH key `~/.ssh/<pi-key>`
-(config entry `<pi-host>`). **Debian 13 (trixie)**, not Bookworm — the deploy docs
+`<pi-host>` — your device's SSH alias (set it up in `~/.ssh/config`). **Debian 13 (trixie)**, not Bookworm — the deploy docs
 originally assumed Bookworm. The binary is built against Bookworm's glibc 2.36 and runs
 fine on trixie's 2.41 (forward compatibility); do not "fix" this by building on trixie
 unless the Pi is upgraded past the build image.

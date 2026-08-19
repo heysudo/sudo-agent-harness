@@ -42,7 +42,12 @@ impl Default for Chunker {
 
 impl Chunker {
     pub fn new() -> Self {
-        Self { buffer: String::new(), tokens: 0, first_token_at: None, emitted_first: false }
+        Self {
+            buffer: String::new(),
+            tokens: 0,
+            first_token_at: None,
+            emitted_first: false,
+        }
     }
 
     /// When the caller should give up waiting and emit whatever it has.
@@ -129,7 +134,11 @@ impl Chunker {
         self.tokens = 0;
         self.emitted_first = true;
         let trimmed = text.trim().to_string();
-        if trimmed.is_empty() { None } else { Some(trimmed) }
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
     }
 
     /// Split at `cut` (a byte index just past the boundary char), keeping the
@@ -141,7 +150,11 @@ impl Chunker {
         // Token count restarts; the tail is usually a word or two.
         self.tokens = if self.buffer.trim().is_empty() { 0 } else { 1 };
         let trimmed = chunk.trim().to_string();
-        if trimmed.is_empty() { None } else { Some(trimmed) }
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
     }
 }
 
@@ -165,12 +178,17 @@ fn last_boundary(s: &str, boundaries: &[char]) -> Option<usize> {
             let prev = s[..i].chars().next_back();
             let next = s[after..].chars().next();
             // Decimal or version number: 3.5
-            if prev.is_some_and(|p| p.is_ascii_digit()) && next.is_some_and(|n| n.is_ascii_digit()) {
+            if prev.is_some_and(|p| p.is_ascii_digit()) && next.is_some_and(|n| n.is_ascii_digit())
+            {
                 continue;
             }
             // Abbreviation like "e.g." / "U.S." — single letter before the dot.
             if prev.is_some_and(|p| p.is_alphabetic())
-                && s[..i].chars().rev().nth(1).is_some_and(|p2| !p2.is_alphanumeric())
+                && s[..i]
+                    .chars()
+                    .rev()
+                    .nth(1)
+                    .is_some_and(|p2| !p2.is_alphanumeric())
             {
                 continue;
             }
@@ -193,9 +211,8 @@ fn last_boundary(s: &str, boundaries: &[char]) -> Option<usize> {
 }
 
 const ABBREVIATIONS: &[&str] = &[
-    "mr.", "mrs.", "ms.", "dr.", "prof.", "st.", "vs.", "etc.", "approx.", "no.",
-    "fig.", "jan.", "feb.", "mar.", "apr.", "jun.", "jul.", "aug.", "sep.", "sept.",
-    "oct.", "nov.", "dec.",
+    "mr.", "mrs.", "ms.", "dr.", "prof.", "st.", "vs.", "etc.", "approx.", "no.", "fig.", "jan.",
+    "feb.", "mar.", "apr.", "jun.", "jul.", "aug.", "sep.", "sept.", "oct.", "nov.", "dec.",
 ];
 
 fn ends_with_abbreviation(s: &str) -> bool {
@@ -215,7 +232,11 @@ mod tests {
     fn feed(c: &mut Chunker, text: &str) -> Vec<String> {
         let mut out = Vec::new();
         for (i, w) in text.split(' ').enumerate() {
-            let tok = if i == 0 { w.to_string() } else { format!(" {w}") };
+            let tok = if i == 0 {
+                w.to_string()
+            } else {
+                format!(" {w}")
+            };
             if let Some(chunk) = c.push(&tok) {
                 out.push(chunk);
             }
@@ -227,7 +248,10 @@ mod tests {
     fn first_chunk_emits_at_punctuation_after_twelve_tokens() {
         let mut c = Chunker::new();
         // 13 tokens with a comma at the end of token 13.
-        let out = feed(&mut c, "one two three four five six seven eight nine ten eleven twelve,");
+        let out = feed(
+            &mut c,
+            "one two three four five six seven eight nine ten eleven twelve,",
+        );
         assert_eq!(out.len(), 1);
         assert!(out[0].ends_with(','), "got {:?}", out[0]);
         assert!(out[0].starts_with("one two"));
@@ -244,7 +268,10 @@ mod tests {
     #[test]
     fn first_chunk_emits_at_forty_tokens_without_punctuation() {
         let mut c = Chunker::new();
-        let text = (0..45).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+        let text = (0..45)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         let out = feed(&mut c, &text);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].split_whitespace().count(), 40);
@@ -266,7 +293,9 @@ mod tests {
     fn on_deadline_emits_a_short_first_clause() {
         let mut c = Chunker::new();
         feed(&mut c, "the answer is");
-        let chunk = c.on_deadline().expect("deadline should flush the partial clause");
+        let chunk = c
+            .on_deadline()
+            .expect("deadline should flush the partial clause");
         assert_eq!(chunk, "the answer is");
         assert!(c.on_deadline().is_none(), "nothing left to emit");
     }
@@ -280,13 +309,19 @@ mod tests {
             &mut c,
             "this is a sentence. and here, with a comma, is more text that continues on.",
         );
-        assert!(out.iter().all(|s| s.ends_with('.')), "later chunks must end sentences: {out:?}");
+        assert!(
+            out.iter().all(|s| s.ends_with('.')),
+            "later chunks must end sentences: {out:?}"
+        );
         assert!(out.iter().any(|s| s.contains("with a comma")));
     }
 
     #[test]
     fn decimals_are_not_sentence_boundaries() {
-        assert_eq!(last_boundary("it costs 3.5 million", SENTENCE_BOUNDARY), None);
+        assert_eq!(
+            last_boundary("it costs 3.5 million", SENTENCE_BOUNDARY),
+            None
+        );
         assert_eq!(last_boundary("version 2.0 is out", SENTENCE_BOUNDARY), None);
     }
 
@@ -341,9 +376,15 @@ mod tests {
         let mut c = Chunker::new();
         feed(&mut c, "opening clause.");
         let _ = c.on_deadline();
-        let text = (0..70).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+        let text = (0..70)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         let out = feed(&mut c, &text);
-        assert!(!out.is_empty(), "must not buffer forever without punctuation");
+        assert!(
+            !out.is_empty(),
+            "must not buffer forever without punctuation"
+        );
     }
 
     #[test]
@@ -363,7 +404,10 @@ mod tests {
     #[test]
     fn multibyte_text_never_panics() {
         let mut c = Chunker::new();
-        let mut chunks = feed(&mut c, "日本語のテキストです。これは二番目の文です。さらに続きます。");
+        let mut chunks = feed(
+            &mut c,
+            "日本語のテキストです。これは二番目の文です。さらに続きます。",
+        );
         if let Some(t) = c.flush() {
             chunks.push(t);
         }

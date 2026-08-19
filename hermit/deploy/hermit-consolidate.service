@@ -36,7 +36,6 @@ SupplementaryGroups=audio
 # Same secrets as the daemon: consolidation calls the LLM to summarise.
 EnvironmentFile=/etc/hermit/hermit.env
 Environment=RUST_LOG=info
-Environment=RUST_BACKTRACE=1
 
 WorkingDirectory=/opt/hermit
 ExecStart=/opt/hermit/bin/hermit consolidate --config /opt/hermit/config/hermit.toml

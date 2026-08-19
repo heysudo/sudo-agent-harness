@@ -179,7 +179,8 @@ impl Gateway {
             let player = self.player.clone();
             let lang = reply_lang.clone();
             Some(tokio::spawn(async move {
-                tts.speak(chunk_rx, &player, generation, lang.as_deref()).await
+                tts.speak(chunk_rx, &player, generation, lang.as_deref())
+                    .await
             }))
         } else {
             drop(chunk_rx);

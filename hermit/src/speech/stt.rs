@@ -477,7 +477,10 @@ pub fn parse_event(raw: &str) -> Option<SttEvent> {
         Some("UtteranceEnd") => return None, // covered by speech_final
         Some("SpeechStarted") => return None,
         Some("Error") => {
-            let msg = v.get("description").and_then(|d| d.as_str()).unwrap_or("deepgram error");
+            let msg = v
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("deepgram error");
             return Some(SttEvent::Closed(Some(msg.to_string())));
         }
         Some(_) => return None,
@@ -498,7 +501,10 @@ pub fn parse_event(raw: &str) -> Option<SttEvent> {
     }
 
     let is_final = v.get("is_final").and_then(|x| x.as_bool()).unwrap_or(false);
-    let speech_final = v.get("speech_final").and_then(|x| x.as_bool()).unwrap_or(false);
+    let speech_final = v
+        .get("speech_final")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
 
     Some(if speech_final {
         SttEvent::EndOfSpeech(transcript)
@@ -650,7 +656,10 @@ mod tests {
         let url = sarvam("or-IN").connect_url();
         assert!(url.contains("threshold=0.15"), "got {url}");
         assert!(url.contains("silence_duration_ms=500"), "got {url}");
-        assert!(!url.contains("vad_silence_duration_ms"), "wrong param name: {url}");
+        assert!(
+            !url.contains("vad_silence_duration_ms"),
+            "wrong param name: {url}"
+        );
     }
 
     #[test]
@@ -659,7 +668,10 @@ mod tests {
         // "Missing required query parameter 'language_code'".
         let url = sarvam("or-IN").connect_url();
         assert!(url.contains("language_code=or-IN"), "got {url}");
-        assert!(!url.contains("language-code"), "hyphen form is rejected: {url}");
+        assert!(
+            !url.contains("language-code"),
+            "hyphen form is rejected: {url}"
+        );
         assert!(url.contains("model=saaras:v3-realtime"), "got {url}");
     }
 
@@ -679,18 +691,25 @@ mod tests {
     fn sarvam_partials_are_interim_and_finals_are_final() {
         // Real payloads captured from the live socket.
         assert_eq!(
-            parse_sarvam_event(r#"{"event":"transcript.partial","utterance_idx":0,"text":"ମୋ ନାମ"}"#),
+            parse_sarvam_event(
+                r#"{"event":"transcript.partial","utterance_idx":0,"text":"ମୋ ନାମ"}"#
+            ),
             Some(SttEvent::Interim("ମୋ ନାମ".into()))
         );
         assert_eq!(
-            parse_sarvam_event(r#"{"event":"transcript.final","utterance_idx":0,"text":"ମୋ ନାମ ଅଶୀଷ"}"#),
+            parse_sarvam_event(
+                r#"{"event":"transcript.final","utterance_idx":0,"text":"ମୋ ନାମ ଅଶୀଷ"}"#
+            ),
             Some(SttEvent::Final("ମୋ ନାମ ଅଶୀଷ".into()))
         );
     }
 
     #[test]
     fn sarvam_session_begin_and_speech_start_are_not_events() {
-        assert_eq!(parse_sarvam_event(r#"{"event":"session.begin","config":{}}"#), None);
+        assert_eq!(
+            parse_sarvam_event(r#"{"event":"session.begin","config":{}}"#),
+            None
+        );
         assert_eq!(
             parse_sarvam_event(r#"{"event":"vad.speech_start","confidence":0.97}"#),
             None
@@ -737,7 +756,9 @@ mod tests {
         let mut b = TranscriptBuilder::default();
         b.apply(&SttEvent::Interim("What is the weather in Bhubanes".into()));
         b.apply(&SttEvent::EndOfSpeech(String::new()));
-        b.apply(&SttEvent::Final("What is the weather in Bhubaneswar?".into()));
+        b.apply(&SttEvent::Final(
+            "What is the weather in Bhubaneswar?".into(),
+        ));
         assert!(b.best_utterance().contains("Bhubaneswar?"));
     }
 
@@ -746,7 +767,8 @@ mod tests {
         // Live finding: with language_code=auto every transcript frame carries a
         // "language" tag — including empty-text partials that parse_sarvam_event
         // drops, so the tag is read independently of the transcript.
-        let frame = r#"{"event":"transcript.partial","utterance_idx":0,"text":"","language":"or-IN"}"#;
+        let frame =
+            r#"{"event":"transcript.partial","utterance_idx":0,"text":"","language":"or-IN"}"#;
         assert_eq!(sarvam_frame_language(frame).as_deref(), Some("or-IN"));
         assert_eq!(
             sarvam_frame_language(r#"{"event":"vad.speech_start","utterance_idx":0}"#),
@@ -764,7 +786,11 @@ mod tests {
         assert_eq!(stt_to_tts_lang("or-IN"), Some("od-IN"));
         assert_eq!(stt_to_tts_lang("hi-IN"), Some("hi-IN"));
         assert_eq!(stt_to_tts_lang("en-IN"), Some("en-IN"));
-        assert_eq!(stt_to_tts_lang("sat-IN"), None, "Bulbul cannot speak Santali");
+        assert_eq!(
+            stt_to_tts_lang("sat-IN"),
+            None,
+            "Bulbul cannot speak Santali"
+        );
     }
 
     fn results(transcript: &str, is_final: bool, speech_final: bool) -> String {
@@ -845,7 +871,11 @@ mod tests {
         b.apply(&SttEvent::Final("what's the weather".into()));
         b.apply(&SttEvent::Interim("in".into()));
         assert_eq!(b.provisional(), "what's the weather in");
-        assert_eq!(b.finished(), "what's the weather", "interim must not reach the answer path");
+        assert_eq!(
+            b.finished(),
+            "what's the weather",
+            "interim must not reach the answer path"
+        );
 
         b.apply(&SttEvent::EndOfSpeech("in Oslo tomorrow".into()));
         assert_eq!(b.finished(), "what's the weather in Oslo tomorrow");

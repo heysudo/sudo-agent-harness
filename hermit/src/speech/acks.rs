@@ -64,7 +64,10 @@ pub struct AckBank {
 
 impl AckBank {
     pub fn empty() -> Self {
-        Self { banks: Vec::new(), cursor: AtomicUsize::new(0) }
+        Self {
+            banks: Vec::new(),
+            cursor: AtomicUsize::new(0),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -79,11 +82,7 @@ impl AckBank {
     ///
     /// Failure is never fatal: a device that answers without an acknowledgment
     /// sound is fine, one that will not boot is not.
-    pub async fn load_or_build(
-        dir: &Path,
-        tts: &super::tts::Tts,
-        player: &AudioPlayer,
-    ) -> Self {
+    pub async fn load_or_build(dir: &Path, tts: &super::tts::Tts, player: &AudioPlayer) -> Self {
         if let Err(e) = std::fs::create_dir_all(dir) {
             tracing::warn!(dir = %dir.display(), error = %e, "cannot create ack dir");
             return Self::empty();
@@ -130,7 +129,10 @@ impl AckBank {
 
         let total: usize = banks.iter().map(|(_, c)| c.len()).sum();
         tracing::info!(count = total, dir = %dir.display(), "acknowledgment clips ready");
-        Self { banks, cursor: AtomicUsize::new(0) }
+        Self {
+            banks,
+            cursor: AtomicUsize::new(0),
+        }
     }
 
     /// Build directly from PCM as the default-language bank, for tests.
@@ -165,6 +167,7 @@ fn clip_path_lang(dir: &Path, lang: &str, index: usize) -> PathBuf {
 }
 
 /// Legacy single-language path, still used by the disk round-trip test.
+#[cfg(test)]
 fn clip_path(dir: &Path, index: usize) -> PathBuf {
     dir.join(format!("ack{index}.pcm"))
 }
@@ -194,14 +197,17 @@ async fn synthesize(
     lang: Option<&str>,
 ) -> Result<Vec<i16>> {
     let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let backend = CaptureBackend { out: captured.clone() };
+    let backend = CaptureBackend {
+        out: captured.clone(),
+    };
     let capture_player = AudioPlayer::spawn_with(Box::new(backend), 16_000)?;
 
     let (tx, rx) = tokio::sync::mpsc::channel(2);
     tx.send(phrase.to_string()).await.ok();
     drop(tx);
 
-    tts.speak(rx, &capture_player, capture_player.generation(), lang).await?;
+    tts.speak(rx, &capture_player, capture_player.generation(), lang)
+        .await?;
 
     // Let the playback thread finish consuming before reading the buffer.
     for _ in 0..100 {
@@ -245,7 +251,10 @@ mod tests {
             let phrases = phrases_for(lang);
             assert_eq!(phrases.len(), 6, "{lang}");
             for p in phrases {
-                assert!(p.split_whitespace().count() <= 6, "{p:?} is too long to be instant");
+                assert!(
+                    p.split_whitespace().count() <= 6,
+                    "{p:?} is too long to be instant"
+                );
             }
         }
         // Unknown language falls back to English.
@@ -262,11 +271,8 @@ mod tests {
             ],
             cursor: AtomicUsize::new(0),
         };
-        let p = AudioPlayer::spawn_with(
-            Box::new(crate::audio::NullBackend::new(16_000)),
-            16_000,
-        )
-        .unwrap();
+        let p = AudioPlayer::spawn_with(Box::new(crate::audio::NullBackend::new(16_000)), 16_000)
+            .unwrap();
         assert!(bank.play_in(&p, Some("od-IN")), "exact language bank");
         assert!(bank.play_in(&p, Some("hi-IN")), "empty bank falls back");
         assert!(bank.play_in(&p, Some("fr-FR")), "unknown falls back");
@@ -276,11 +282,8 @@ mod tests {
     #[test]
     fn empty_bank_plays_nothing_without_panicking() {
         let bank = AckBank::empty();
-        let p = AudioPlayer::spawn_with(
-            Box::new(crate::audio::NullBackend::new(16_000)),
-            16_000,
-        )
-        .unwrap();
+        let p = AudioPlayer::spawn_with(Box::new(crate::audio::NullBackend::new(16_000)), 16_000)
+            .unwrap();
         assert!(!bank.play(&p));
         assert!(bank.is_empty());
     }
@@ -289,11 +292,8 @@ mod tests {
     fn clips_round_robin() {
         let bank = AckBank::from_clips(vec![vec![1], vec![2], vec![3]]);
         assert_eq!(bank.len(), 3);
-        let p = AudioPlayer::spawn_with(
-            Box::new(crate::audio::NullBackend::new(16_000)),
-            16_000,
-        )
-        .unwrap();
+        let p = AudioPlayer::spawn_with(Box::new(crate::audio::NullBackend::new(16_000)), 16_000)
+            .unwrap();
         for _ in 0..7 {
             assert!(bank.play(&p));
         }
@@ -313,14 +313,14 @@ mod tests {
     #[tokio::test]
     async fn missing_dir_and_no_tts_yields_an_empty_bank_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let p = AudioPlayer::spawn_with(
-            Box::new(crate::audio::NullBackend::new(16_000)),
-            16_000,
+        let p = AudioPlayer::spawn_with(Box::new(crate::audio::NullBackend::new(16_000)), 16_000)
+            .unwrap();
+        let bank = AckBank::load_or_build(
+            &dir.path().join("nested"),
+            &super::super::tts::Tts::Disabled,
+            &p,
         )
-        .unwrap();
-        let bank =
-            AckBank::load_or_build(&dir.path().join("nested"), &super::super::tts::Tts::Disabled, &p)
-                .await;
+        .await;
         assert!(bank.is_empty());
     }
 }

@@ -160,7 +160,11 @@ impl HeySudo {
     }
 
     pub fn from_config(cfg: &crate::config::Wake) -> Result<Self> {
-        let threshold = if cfg.sensitivity > 0.0 { cfg.sensitivity } else { DEFAULT_THRESHOLD };
+        let threshold = if cfg.sensitivity > 0.0 {
+            cfg.sensitivity
+        } else {
+            DEFAULT_THRESHOLD
+        };
         Self::load(cfg.keyword_path.as_deref(), threshold)
     }
 
@@ -192,7 +196,9 @@ impl HeySudo {
         let mut embeddings: Vec<Vec<f32>> = Vec::new();
         let mut start = 0;
         while start + EMBEDDING_WINDOW <= n_mel {
-            let win = mel.slice(ndarray::s![start..start + EMBEDDING_WINDOW, ..]).to_owned();
+            let win = mel
+                .slice(ndarray::s![start..start + EMBEDDING_WINDOW, ..])
+                .to_owned();
             embeddings.push(self.run_embed(&win)?);
             start += EMBEDDING_STRIDE;
         }

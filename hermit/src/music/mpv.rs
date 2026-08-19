@@ -27,7 +27,9 @@ pub struct MpvClient {
 
 impl MpvClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
-        Self { socket: socket.into() }
+        Self {
+            socket: socket.into(),
+        }
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -66,7 +68,9 @@ impl MpvClient {
                 if n == 0 {
                     bail!("mpv closed the connection without replying");
                 }
-                let Ok(v) = serde_json::from_str::<Value>(&buf) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(&buf) else {
+                    continue;
+                };
                 if v.get("request_id").and_then(Value::as_i64) != Some(1) {
                     continue; // an event, not our reply
                 }
@@ -88,12 +92,16 @@ impl MpvClient {
     }
 
     pub async fn set_property(&self, name: &str, value: Value) -> Result<()> {
-        self.command(json!(["set_property", name, value])).await.map(|_| ())
+        self.command(json!(["set_property", name, value]))
+            .await
+            .map(|_| ())
     }
 
     /// Replace whatever is playing with `url`.
     pub async fn loadfile(&self, url: &str) -> Result<()> {
-        self.command(json!(["loadfile", url, "replace"])).await.map(|_| ())
+        self.command(json!(["loadfile", url, "replace"]))
+            .await
+            .map(|_| ())
     }
 
     pub async fn pause(&self) -> Result<()> {
@@ -111,7 +119,8 @@ impl MpvClient {
 
     /// mpv volume is 0–100 (and may exceed 100; we never do).
     pub async fn set_volume(&self, percent: u8) -> Result<()> {
-        self.set_property("volume", json!(percent.min(100) as i64)).await
+        self.set_property("volume", json!(percent.min(100) as i64))
+            .await
     }
 
     pub async fn volume(&self) -> Result<u8> {
@@ -125,7 +134,11 @@ impl MpvClient {
 
     /// Whether anything is loaded at all.
     pub async fn is_idle(&self) -> Result<bool> {
-        Ok(self.get_property("idle-active").await?.as_bool().unwrap_or(true))
+        Ok(self
+            .get_property("idle-active")
+            .await?
+            .as_bool()
+            .unwrap_or(true))
     }
 
     /// Best-effort "what's playing": stream title from ICY metadata, else the
@@ -147,7 +160,6 @@ impl MpvClient {
 mod tests {
     use super::*;
 
-
     /// Stand up a fake mpv that speaks the real IPC dialect.
     async fn fake_mpv(
         responder: impl Fn(&Value) -> Value + Send + Sync + 'static,
@@ -159,7 +171,9 @@ mod tests {
 
         tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { return };
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
                 let responder = responder.clone();
                 tokio::spawn(async move {
                     let (r, mut w) = stream.into_split();
@@ -224,6 +238,9 @@ mod tests {
             }
         })
         .await;
-        assert_eq!(c.now_playing().await.as_deref(), Some("Some Station - Track"));
+        assert_eq!(
+            c.now_playing().await.as_deref(),
+            Some("Some Station - Track")
+        );
     }
 }

@@ -9,6 +9,11 @@
 [server]
 ws_bind = "127.0.0.1:8765"   # loopback only; text clients connect here
 cli = true                   # read turns from stdin (used by scripts/bench.sh)
+# The WS gateway is an agent control surface: every accepted message spends
+# LLM/tool budget. Binding beyond loopback REQUIRES HERMIT_WS_TOKEN in
+# /etc/hermit/hermit.env (the daemon refuses to start otherwise).
+ws_allow_listen = false      # /listen (remote mic arming) needs explicit opt-in
+ws_max_connections = 4       # each connection is standing permission to spend
 
 [paths]
 data_dir = "/var/lib/hermit"        # SQLite + the learned core.md
@@ -147,6 +152,8 @@ dedupe_similarity = 0.8       # token containment above which a fact is a duplic
 enabled = true
 turns_per_nudge = 6
 idle_secs = 60
+# Drafts go to <data_dir>/skills-pending/ (quarantine). Review a draft, then
+# move it into <config_dir>/skills/ to activate — drafts are never auto-indexed.
 skill_creation = true
 
 [research]

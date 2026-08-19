@@ -44,7 +44,9 @@ fn poisoned_page_text_never_appears_in_recall() {
     // Simulate a full turn where a poisoned page was fetched: the user asked a
     // question, the assistant answered. The page itself is tool output and is
     // therefore never persisted.
-    store.record_message("user", "when is high tide in Bergen").unwrap();
+    store
+        .record_message("user", "when is high tide in Bergen")
+        .unwrap();
     store
         .record_message("assistant", "High tide in Bergen is at twenty past two.")
         .unwrap();
@@ -89,7 +91,8 @@ fn facts_can_only_be_written_through_a_parsed_reflection_batch() {
     // Even the JSON-shaped instruction embedded in a page has to come through the
     // reflection model to become a batch; there is no other constructor.
     let legitimate =
-        parse_extraction(r#"{"facts":[{"text":"user lives in Bergen","importance":0.8}]}"#).unwrap();
+        parse_extraction(r#"{"facts":[{"text":"user lives in Bergen","importance":0.8}]}"#)
+            .unwrap();
     assert_eq!(store.apply_reflection(&legitimate, 0.8).unwrap(), 1);
     assert_eq!(store.fact_count(), 1);
 }
@@ -172,7 +175,9 @@ fn core_memory_stays_within_its_cap_across_a_rewrite() {
     let layers = prompt::Layers::load(dir.path(), dir.path(), 600);
 
     // Consolidation overruns its instructions and emits far too much.
-    let overlong: String = (0..500).map(|i| format!("- durable preference number {i}\n")).collect();
+    let overlong: String = (0..500)
+        .map(|i| format!("- durable preference number {i}\n"))
+        .collect();
     layers.write_core(dir.path(), &overlong).unwrap();
 
     assert!(
@@ -183,7 +188,10 @@ fn core_memory_stays_within_its_cap_across_a_rewrite() {
 
     let on_disk = std::fs::read_to_string(dir.path().join("core.md")).unwrap();
     assert!(hermit::memory::approx_tokens(&on_disk) <= 600);
-    assert!(!on_disk.is_empty(), "truncation must keep the top of the file");
+    assert!(
+        !on_disk.is_empty(),
+        "truncation must keep the top of the file"
+    );
 }
 
 #[test]

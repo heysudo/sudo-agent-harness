@@ -17,7 +17,11 @@ pub struct NullBackend {
 
 impl NullBackend {
     pub fn new(sample_rate: u32) -> Self {
-        Self { sample_rate: sample_rate.max(1), playhead: None, realtime: false }
+        Self {
+            sample_rate: sample_rate.max(1),
+            playhead: None,
+            realtime: false,
+        }
     }
 
     /// Sleep in proportion to the audio written, approximating a real device.

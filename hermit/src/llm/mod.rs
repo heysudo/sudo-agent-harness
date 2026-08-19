@@ -103,13 +103,28 @@ pub struct WireFunction {
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: Some(content.into()), tool_calls: None, tool_call_id: None }
+        Self {
+            role: Role::System,
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: Some(content.into()), tool_calls: None, tool_call_id: None }
+        Self {
+            role: Role::User,
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: Some(content.into()), tool_calls: None, tool_call_id: None }
+        Self {
+            role: Role::Assistant,
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
     }
     /// Assistant turn that requested tools. Content is usually empty here.
     pub fn assistant_tool_calls(calls: &[ToolCall]) -> Self {
@@ -122,7 +137,10 @@ impl ChatMessage {
                     .map(|c| WireToolCall {
                         id: c.id.clone(),
                         kind: "function".into(),
-                        function: WireFunction { name: c.name.clone(), arguments: c.arguments.clone() },
+                        function: WireFunction {
+                            name: c.name.clone(),
+                            arguments: c.arguments.clone(),
+                        },
                     })
                     .collect(),
             ),
@@ -193,7 +211,11 @@ mod tests {
 
     #[test]
     fn tool_call_parses_empty_arguments_as_empty_object() {
-        let tc = ToolCall { id: "1".into(), name: "news_briefing".into(), arguments: "".into() };
+        let tc = ToolCall {
+            id: "1".into(),
+            name: "news_briefing".into(),
+            arguments: "".into(),
+        };
         assert_eq!(tc.args(), serde_json::json!({}));
     }
 
@@ -209,7 +231,11 @@ mod tests {
 
     #[test]
     fn malformed_arguments_degrade_to_empty_rather_than_panicking() {
-        let tc = ToolCall { id: "1".into(), name: "web_search".into(), arguments: "{not json".into() };
+        let tc = ToolCall {
+            id: "1".into(),
+            name: "web_search".into(),
+            arguments: "{not json".into(),
+        };
         assert_eq!(tc.args(), serde_json::json!({}));
     }
 
@@ -223,7 +249,10 @@ mod tests {
     fn tool_messages_serialize_without_null_fields() {
         let m = ChatMessage::user("hi");
         let j = serde_json::to_value(&m).unwrap();
-        assert!(j.get("tool_calls").is_none(), "null fields must be omitted to keep the prefix byte-stable");
+        assert!(
+            j.get("tool_calls").is_none(),
+            "null fields must be omitted to keep the prefix byte-stable"
+        );
         assert_eq!(j["role"], "user");
     }
 }

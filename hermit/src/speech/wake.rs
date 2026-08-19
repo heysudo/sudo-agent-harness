@@ -99,7 +99,10 @@ pub struct FrameFeeder<D: WakeDetector> {
 impl<D: WakeDetector> FrameFeeder<D> {
     pub fn new(detector: D) -> Self {
         let cap = detector.frame_length() * 4;
-        Self { detector, buffer: Vec::with_capacity(cap) }
+        Self {
+            detector,
+            buffer: Vec::with_capacity(cap),
+        }
     }
 
     /// Push arbitrary-length audio; returns the keyword index if one fires.
@@ -286,10 +289,8 @@ pub mod porcupine {
                 Some(p) => p.to_string_lossy().to_string(),
                 None => {
                     // Built-in keywords ship as .ppn files next to the library.
-                    let guess = format!(
-                        "/opt/hermit/lib/keywords/{}_raspberry-pi.ppn",
-                        cfg.keyword
-                    );
+                    let guess =
+                        format!("/opt/hermit/lib/keywords/{}_raspberry-pi.ppn", cfg.keyword);
                     if !Path::new(&guess).exists() {
                         bail!(
                             "no keyword file for {:?}. Copy the .ppn to {guess}, or set \
@@ -348,9 +349,9 @@ pub mod porcupine {
                 let sample_rate: Symbol<FnSampleRate> = lib
                     .get(b"pv_sample_rate\0")
                     .context("libpv_porcupine is missing pv_sample_rate")?;
-                let frame_length: Symbol<FnFrameLength> = lib
-                    .get(b"pv_porcupine_frame_length\0")
-                    .context("libpv_porcupine is missing pv_porcupine_frame_length")?;
+                let frame_length: Symbol<FnFrameLength> =
+                    lib.get(b"pv_porcupine_frame_length\0")
+                        .context("libpv_porcupine is missing pv_porcupine_frame_length")?;
                 let init: Symbol<FnInit> = lib
                     .get(b"pv_porcupine_init\0")
                     .context("libpv_porcupine is missing pv_porcupine_init")?;
@@ -405,7 +406,11 @@ pub mod porcupine {
                 let delete_fn: FnDelete = *delete;
 
                 Ok(Self {
-                    handle: Handle { ptr: object, process: process_fn, delete: delete_fn },
+                    handle: Handle {
+                        ptr: object,
+                        process: process_fn,
+                        delete: delete_fn,
+                    },
                     _lib: lib,
                     frame_length: frame_len,
                 })
@@ -457,7 +462,11 @@ mod tests {
             self.frame_length
         }
         fn process(&mut self, frame: &[i16]) -> Option<usize> {
-            assert_eq!(frame.len(), self.frame_length, "frames must be exactly sized");
+            assert_eq!(
+                frame.len(),
+                self.frame_length,
+                "frames must be exactly sized"
+            );
             self.seen += 1;
             (self.seen == self.n).then_some(0)
         }
@@ -465,7 +474,11 @@ mod tests {
 
     #[test]
     fn feeder_slices_into_exact_frames_across_ragged_reads() {
-        let mut f = FrameFeeder::new(FiresOnFrame { n: 3, seen: 0, frame_length: 512 });
+        let mut f = FrameFeeder::new(FiresOnFrame {
+            n: 3,
+            seen: 0,
+            frame_length: 512,
+        });
         // ALSA-shaped reads that do not divide evenly into 512.
         assert_eq!(f.push(&vec![0i16; 320]), None);
         assert_eq!(f.push(&vec![0i16; 320]), None); // 640 -> one frame, 128 left
@@ -503,7 +516,10 @@ mod tests {
 
     #[test]
     fn disabled_config_yields_a_silent_detector() {
-        let cfg = crate::config::Wake { enabled: false, ..Default::default() };
+        let cfg = crate::config::Wake {
+            enabled: false,
+            ..Default::default()
+        };
         let mut d = build(&cfg);
         assert_eq!(d.process(&vec![0i16; d.frame_length()]), None);
     }

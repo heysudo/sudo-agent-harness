@@ -60,19 +60,55 @@ first byte in 497 ms p50, the daemon's pooled warm connection in 366 ms.
 
 ## Quick start
 
-Never compile on the Pi; the 1 GB of RAM is for inference-adjacent work, not
-rustc. Builds run in an arm64 container on your dev machine.
+Target hardware: a Raspberry Pi 4 (1 GB is enough), a reSpeaker XVF3800
+USB 4-mic array, and any small speaker on its 3.5 mm out. Never compile on
+the Pi; the 1 GB of RAM is for inference-adjacent work, not rustc. Builds run
+in an arm64 container on your dev machine.
 
 ```bash
-cd hermit
+# on your dev machine (Docker or Colima running)
+git clone https://github.com/heysudo/sudo-agent-harness && cd sudo-agent-harness/hermit
+cargo test                         # 241 tests; no network, no API keys
 scripts/build-pi.sh                # arm64 binary via rust:1-bookworm container
-scripts/deploy.sh <pi-host>        # rsync binary + config + firmware
-cargo test                         # 232 tests; no network, no API keys
+
+# on the device (fresh Raspberry Pi OS / Debian 12+, SSH enabled)
+sudo deploy/provision.sh           # users, dirs, systemd units, sudoers, ALSA
+sudoedit /etc/hermit/hermit.env    # keys: start from .env.example (Cerebras required)
+
+# back on your dev machine
+scripts/deploy.sh <pi-host>        # rsync binary + config + firmware, restart
 ```
 
-Then flash the mic-array firmware, run `deploy/provision.sh` on the Pi, fill
-`/etc/hermit/hermit.env`, and start the service. `docs/BRINGUP.md` in
-`hermit/` walks the hardware phase; `deploy/README.md` covers the rest.
+Then say "Hey Sudo". `hermit/docs/BRINGUP.md` walks the hardware phase
+(mic-array firmware, ALSA verification, latency gates); `hermit/deploy/README.md`
+covers provisioning in detail. The only *required* key is `CEREBRAS_API_KEY`;
+everything else degrades gracefully — no TTS key means text-only answers, no
+Spotify means radio still works.
+
+## Security posture
+
+The daemon assumes it will one day sit on a hostile network and eat hostile
+web pages. The interesting defenses, all acceptance-tested:
+
+- **WS gateway is auth-gated and capped.** Loopback by default; a non-loopback
+  bind refuses to start without `HERMIT_WS_TOKEN` (bearer header or `/auth`
+  first message), connections are capped, frames are limited to 64 KiB, and
+  remote mic-arming (`/listen`) is a separate opt-in (`server.ws_allow_listen`).
+- **Memory firewall.** There is no API to write raw text into memory; tool
+  output structurally cannot reach the reflection transcript
+  (`tests/memory_firewall.rs` proves it with a poisoned page).
+- **Skill quarantine.** Model-distilled skills land in
+  `/var/lib/hermit/skills-pending/`, which is never indexed into prompts. A
+  human moves a reviewed draft into the root-owned config dir to activate it
+  (`tests/skill_quarantine.rs` proves drafts can't reach recall) — closing the
+  second-order injection path where a poisoned page transits the model's own
+  answer into persistent instructions.
+- **No shell anywhere.** The one child process (piper TTS) gets text via
+  stdin. Music is mpv JSON-IPC and the Spotify Web API. Fetch URLs are
+  scheme-whitelisted with credentials-in-URL rejected.
+- **Hardened unit.** `ProtectSystem=strict`, closed device policy with an
+  explicit ALSA exception, seccomp, memory cgroups, watchdog; secrets only via
+  root-owned `EnvironmentFile`, never in config or repo.
 
 ## Design positions
 

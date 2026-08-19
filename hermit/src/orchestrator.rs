@@ -221,7 +221,9 @@ impl Orchestrator {
             match item? {
                 StreamItem::Token(t) => {
                     if first_token {
-                        timings.ttft_ms.get_or_insert(crate::metrics::ms_since(started));
+                        timings
+                            .ttft_ms
+                            .get_or_insert(crate::metrics::ms_since(started));
                         first_token = false;
                     }
                     answer.push_str(&t);
@@ -252,7 +254,12 @@ impl Orchestrator {
 
         for call in calls {
             let is_search = call.name == "web_search";
-            let query = call.args().get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
+            let query = call
+                .args()
+                .get("query")
+                .and_then(|q| q.as_str())
+                .unwrap_or("")
+                .to_string();
 
             if is_search
                 && prefetched.is_none()
@@ -296,7 +303,12 @@ impl Orchestrator {
 
         // Restore the model's original call order so tool_call_ids line up
         // predictably in the transcript.
-        out.sort_by_key(|(c, _)| calls.iter().position(|x| x.id == c.id).unwrap_or(usize::MAX));
+        out.sort_by_key(|(c, _)| {
+            calls
+                .iter()
+                .position(|x| x.id == c.id)
+                .unwrap_or(usize::MAX)
+        });
         out
     }
 }
@@ -344,8 +356,14 @@ mod tests {
     #[tokio::test]
     async fn prefetch_matches_a_lightly_edited_transcript() {
         let p = prefetch_for("what is the weather in oslo");
-        assert!(p.matches("what is the weather in Oslo"), "casing must not matter");
-        assert!(p.matches("what is the weather in oslo tomorrow"), "a trailing word is normal");
+        assert!(
+            p.matches("what is the weather in Oslo"),
+            "casing must not matter"
+        );
+        assert!(
+            p.matches("what is the weather in oslo tomorrow"),
+            "a trailing word is normal"
+        );
     }
 
     #[tokio::test]
@@ -391,6 +409,10 @@ mod tests {
         } else {
             Effort::parse(&cfg.llm.reasoning_effort_default)
         };
-        assert_eq!(effort, Effort::Low, "ordinary chat must stay on the fast path");
+        assert_eq!(
+            effort,
+            Effort::Low,
+            "ordinary chat must stay on the fast path"
+        );
     }
 }

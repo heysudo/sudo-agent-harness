@@ -137,11 +137,7 @@ impl SpotifyClient {
 
     /// Build from the environment, returning `None` when Spotify is not configured
     /// so the rest of the daemon runs fine without it.
-    pub fn from_env(
-        http: reqwest::Client,
-        api_base: &str,
-        device_name: &str,
-    ) -> Option<Self> {
+    pub fn from_env(http: reqwest::Client, api_base: &str, device_name: &str) -> Option<Self> {
         let id = crate::http::secret_opt("SPOTIFY_CLIENT_ID")?;
         let secret = crate::http::secret_opt("SPOTIFY_CLIENT_SECRET")?;
         let refresh = crate::http::secret_opt("SPOTIFY_REFRESH_TOKEN")?;
@@ -177,7 +173,11 @@ impl SpotifyClient {
         let parsed: TokenResponse =
             serde_json::from_str(&body).context("decoding spotify token response")?;
 
-        let expires_in = if parsed.expires_in == 0 { 3600 } else { parsed.expires_in };
+        let expires_in = if parsed.expires_in == 0 {
+            3600
+        } else {
+            parsed.expires_in
+        };
         let cached = CachedToken {
             access_token: parsed.access_token.clone(),
             expires_at: Instant::now() + Duration::from_secs(expires_in),
@@ -280,7 +280,8 @@ impl SpotifyClient {
     /// Search and start playback of the best match on our device.
     pub async fn play_query(&self, query: &str) -> Result<String> {
         let uri_and_label = self.resolve_query(query).await?;
-        self.play_uri(&uri_and_label.0, uri_and_label.1.clone()).await?;
+        self.play_uri(&uri_and_label.0, uri_and_label.1.clone())
+            .await?;
         Ok(uri_and_label.1)
     }
 
@@ -299,8 +300,17 @@ impl SpotifyClient {
         // Prefer a track, then album, then playlist, then artist. A bare artist
         // name most often means "play this artist", but a track match on the exact
         // phrase is the stronger signal, so tracks win.
-        if let Some(t) = parsed.tracks.as_ref().and_then(|p| p.items.iter().flatten().next()) {
-            let artists = t.artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
+        if let Some(t) = parsed
+            .tracks
+            .as_ref()
+            .and_then(|p| p.items.iter().flatten().next())
+        {
+            let artists = t
+                .artists
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             let label = if artists.is_empty() {
                 t.name.clone()
             } else {
@@ -334,7 +344,8 @@ impl SpotifyClient {
                 tracing::warn!(error = %e, "spotify play failed; rediscovering device and retrying");
                 self.invalidate_device().await;
                 let device = self.device_id().await?;
-                self.put(&format!("/me/player/play?device_id={device}"), Some(body)).await?;
+                self.put(&format!("/me/player/play?device_id={device}"), Some(body))
+                    .await?;
             }
         }
 
@@ -350,7 +361,9 @@ impl SpotifyClient {
         let mut advanced_ms: u64 = 0;
         for _ in 0..10 {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            let Ok(state) = self.state().await else { continue };
+            let Ok(state) = self.state().await else {
+                continue;
+            };
             if !playback_matches(&state, uri) {
                 last_progress = None;
                 advanced_ms = 0;
@@ -386,22 +399,26 @@ impl SpotifyClient {
 
     pub async fn resume(&self) -> Result<()> {
         let device = self.device_id().await?;
-        self.put(&format!("/me/player/play?device_id={device}"), None).await
+        self.put(&format!("/me/player/play?device_id={device}"), None)
+            .await
     }
 
     pub async fn pause(&self) -> Result<()> {
         let device = self.device_id().await?;
-        self.put(&format!("/me/player/pause?device_id={device}"), None).await
+        self.put(&format!("/me/player/pause?device_id={device}"), None)
+            .await
     }
 
     pub async fn next(&self) -> Result<()> {
         let device = self.device_id().await?;
-        self.post(&format!("/me/player/next?device_id={device}")).await
+        self.post(&format!("/me/player/next?device_id={device}"))
+            .await
     }
 
     pub async fn previous(&self) -> Result<()> {
         let device = self.device_id().await?;
-        self.post(&format!("/me/player/previous?device_id={device}")).await
+        self.post(&format!("/me/player/previous?device_id={device}"))
+            .await
     }
 
     pub async fn set_volume(&self, percent: u8) -> Result<()> {
@@ -427,8 +444,17 @@ impl SpotifyClient {
     pub async fn now_playing(&self) -> Option<String> {
         let s = self.state().await.ok()?;
         let t = s.item?;
-        let artists = t.artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
-        Some(if artists.is_empty() { t.name } else { format!("{} by {}", t.name, artists) })
+        let artists = t
+            .artists
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(if artists.is_empty() {
+            t.name
+        } else {
+            format!("{} by {}", t.name, artists)
+        })
     }
 }
 
@@ -437,7 +463,10 @@ fn playback_matches(state: &PlaybackState, requested_uri: &str) -> bool {
         return false;
     }
     if requested_uri.starts_with("spotify:track:") {
-        return state.item.as_ref().is_some_and(|item| item.uri == requested_uri);
+        return state
+            .item
+            .as_ref()
+            .is_some_and(|item| item.uri == requested_uri);
     }
     true
 }
@@ -456,7 +485,9 @@ async fn expect_ok(resp: reqwest::Response) -> Result<()> {
         );
     }
     if status == reqwest::StatusCode::NOT_FOUND {
-        bail!("spotify device not found ({status}) — librespot may have restarted. Response: {body}");
+        bail!(
+            "spotify device not found ({status}) — librespot may have restarted. Response: {body}"
+        );
     }
     bail!("spotify returned {status}: {body}")
 }
@@ -494,10 +525,18 @@ mod tests {
 
     #[test]
     fn from_env_is_none_when_unconfigured() {
-        for k in ["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET", "SPOTIFY_REFRESH_TOKEN"] {
+        for k in [
+            "SPOTIFY_CLIENT_ID",
+            "SPOTIFY_CLIENT_SECRET",
+            "SPOTIFY_REFRESH_TOKEN",
+        ] {
             unsafe { std::env::remove_var(k) };
         }
-        let c = SpotifyClient::from_env(reqwest::Client::new(), "https://api.spotify.com/v1", "Hermit");
+        let c = SpotifyClient::from_env(
+            reqwest::Client::new(),
+            "https://api.spotify.com/v1",
+            "Hermit",
+        );
         assert!(c.is_none(), "Spotify must be optional");
     }
 
@@ -544,8 +583,23 @@ mod tests {
             r#"{"tracks":{"items":[null,{"uri":"spotify:track:x","name":"X","artists":[]}]},"playlists":{"items":[null]}}"#,
         )
         .unwrap();
-        let track = r.tracks.unwrap().items.into_iter().flatten().next().unwrap();
+        let track = r
+            .tracks
+            .unwrap()
+            .items
+            .into_iter()
+            .flatten()
+            .next()
+            .unwrap();
         assert_eq!(track.uri, "spotify:track:x");
-        assert!(r.playlists.unwrap().items.into_iter().flatten().next().is_none());
+        assert!(
+            r.playlists
+                .unwrap()
+                .items
+                .into_iter()
+                .flatten()
+                .next()
+                .is_none()
+        );
     }
 }

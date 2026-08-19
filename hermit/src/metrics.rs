@@ -38,13 +38,19 @@ pub struct TurnTimings {
 
 impl TurnTimings {
     pub fn new(turn_id: u64) -> Self {
-        Self { turn_id, started: Some(Instant::now()), ..Default::default() }
+        Self {
+            turn_id,
+            started: Some(Instant::now()),
+            ..Default::default()
+        }
     }
 
     /// Local harness overhead — the part we actually control on-device.
     /// Spec gate: <= 15 ms.
     pub fn local_overhead_ms(&self) -> f64 {
-        self.route_ms.unwrap_or(0.0) + self.recall_ms.unwrap_or(0.0) + self.assemble_ms.unwrap_or(0.0)
+        self.route_ms.unwrap_or(0.0)
+            + self.recall_ms.unwrap_or(0.0)
+            + self.assemble_ms.unwrap_or(0.0)
     }
 
     pub fn finish(&mut self) {
@@ -55,8 +61,11 @@ impl TurnTimings {
 
     /// Emit the machine-parseable timing line. `bench.sh` greps for `hermit_timing`.
     pub fn emit(&self) {
-        let tools: Vec<String> =
-            self.tool_ms.iter().map(|(n, d)| format!("{n}={d:.1}")).collect();
+        let tools: Vec<String> = self
+            .tool_ms
+            .iter()
+            .map(|(n, d)| format!("{n}={d:.1}"))
+            .collect();
         tracing::info!(
             target: "hermit_timing",
             turn = self.turn_id,

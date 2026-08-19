@@ -255,7 +255,9 @@ impl MusicController {
         let mut last: Option<f64> = None;
         for _ in 0..30 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let Ok(v) = self.mpv.get_property("playback-time").await else { continue };
+            let Ok(v) = self.mpv.get_property("playback-time").await else {
+                continue;
+            };
             let Some(cur) = v.as_f64() else { continue };
             if let Some(prev) = last
                 && cur > prev + 0.5
@@ -270,19 +272,30 @@ impl MusicController {
             st.source = Source::None;
             st.now_playing = None;
         }
-        bail!("YouTube playback did not start for {query:?} (yt-dlp resolve failed or stream stalled)")
+        bail!(
+            "YouTube playback did not start for {query:?} (yt-dlp resolve failed or stream stalled)"
+        )
     }
 
     pub async fn play_station(&self, name: &str) -> Result<()> {
         let url = {
             let stations = self.stations.read().await;
             let key = name.trim().to_lowercase();
+            // Exact key first; then a prefix match ONLY on word boundaries, so
+            // "bbc world" finds "bbc world service" but "npr garbage" does not
+            // match "npr". (Review finding: bare starts_with was too eager.)
             stations
                 .get(&key)
                 .or_else(|| {
                     stations
                         .iter()
-                        .find(|(k, _)| key.starts_with(k.as_str()))
+                        .find(|(k, _)| {
+                            k.split_whitespace()
+                                .zip(key.split_whitespace())
+                                .all(|(a, b)| a == b)
+                                && key.split_whitespace().count() <= k.split_whitespace().count()
+                                && !key.is_empty()
+                        })
                         .map(|(_, v)| v)
                 })
                 .cloned()
@@ -590,6 +603,24 @@ mod tests {
         let c = controller(-12.0);
         let err = c.play_station("classic fm").await.unwrap_err().to_string();
         assert!(err.contains("npr"), "error should help the user: {err}");
+    }
+
+    #[tokio::test]
+    async fn station_prefix_match_respects_word_boundaries() {
+        // Review finding: bare starts_with matched "npr garbage" to "npr".
+        // Words must match whole: a shorter QUERY may prefix a longer NAME
+        // ("bbc world" -> "bbc world service"), never the reverse.
+        let c = controller(-12.0);
+        let err = c.play_station("npr garbage").await.unwrap_err().to_string();
+        assert!(
+            err.contains("no station"),
+            "junk suffix must not match: {err}"
+        );
+        let err = c.play_station("nprx").await.unwrap_err().to_string();
+        assert!(
+            err.contains("no station"),
+            "partial word must not match: {err}"
+        );
     }
 
     #[tokio::test]

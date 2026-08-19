@@ -105,17 +105,28 @@ pub fn load_wav_mono_s16(path: &Path) -> Result<Vec<i16>> {
     let mut fmt_ok = false;
     while pos + 8 <= bytes.len() {
         let id = &bytes[pos..pos + 4];
-        let size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        // Header-derived length: bounds-checked, never unwrapped. A corrupt or
+        // crafted file must produce Err, not a panic — panic=abort in release
+        // would turn it into a daemon crash loop.
+        let size_bytes: [u8; 4] = bytes[pos + 4..pos + 8]
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("truncated chunk header"))?;
+        let size = u32::from_le_bytes(size_bytes) as usize;
         let body = pos + 8;
         match id {
             b"fmt " => {
                 if body + 16 > bytes.len() {
                     bail!("truncated fmt chunk");
                 }
-                let audio_format = u16::from_le_bytes(bytes[body..body + 2].try_into().unwrap());
-                let channels = u16::from_le_bytes(bytes[body + 2..body + 4].try_into().unwrap());
-                let rate = u32::from_le_bytes(bytes[body + 4..body + 8].try_into().unwrap());
-                let bits = u16::from_le_bytes(bytes[body + 14..body + 16].try_into().unwrap());
+                let field = |a: usize, b: usize| -> Result<&[u8]> {
+                    bytes
+                        .get(body + a..body + b)
+                        .ok_or_else(|| anyhow::anyhow!("truncated fmt chunk"))
+                };
+                let audio_format = u16::from_le_bytes(field(0, 2)?.try_into()?);
+                let channels = u16::from_le_bytes(field(2, 4)?.try_into()?);
+                let rate = u32::from_le_bytes(field(4, 8)?.try_into()?);
+                let bits = u16::from_le_bytes(field(14, 16)?.try_into()?);
                 if audio_format != 1 || channels != 1 || rate != 16_000 || bits != 16 {
                     bail!(
                         "earcon must be PCM mono 16-bit 16kHz, got format={audio_format} \

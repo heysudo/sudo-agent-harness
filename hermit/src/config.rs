@@ -38,14 +38,29 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct Server {
     /// Local WebSocket text-client bind address. Loopback only by default.
+    /// Binding beyond loopback requires HERMIT_WS_TOKEN to be set — the daemon
+    /// refuses to start otherwise (see [`Config::validate`]).
     pub ws_bind: String,
     /// Read text turns from stdin and write answers to stdout.
     pub cli: bool,
+    /// Allow WebSocket clients to send `/listen` and remotely arm the
+    /// microphone. Off by default: arming the mic is a control-plane action
+    /// and needs an explicit operator decision, not just network reachability.
+    pub ws_allow_listen: bool,
+    /// Maximum concurrent WebSocket connections. Turns queue serially against
+    /// the turn lock, so each connection is standing permission to spend LLM
+    /// and tool budget — keep this small.
+    pub ws_max_connections: usize,
 }
 
 impl Default for Server {
     fn default() -> Self {
-        Self { ws_bind: "127.0.0.1:8765".into(), cli: true }
+        Self {
+            ws_bind: "127.0.0.1:8765".into(),
+            cli: true,
+            ws_allow_listen: false,
+            ws_max_connections: 4,
+        }
     }
 }
 
@@ -159,9 +174,19 @@ impl Default for News {
     fn default() -> Self {
         Self {
             feeds: vec![
-                FeedSpec { name: "BBC".into(), url: "https://feeds.bbci.co.uk/news/world/rss.xml".into() },
-                FeedSpec { name: "Reuters".into(), url: "https://www.reutersagency.com/feed/?best-topics=top-news&post_type=best".into() },
-                FeedSpec { name: "NPR".into(), url: "https://feeds.npr.org/1001/rss.xml".into() },
+                FeedSpec {
+                    name: "BBC".into(),
+                    url: "https://feeds.bbci.co.uk/news/world/rss.xml".into(),
+                },
+                FeedSpec {
+                    name: "Reuters".into(),
+                    url: "https://www.reutersagency.com/feed/?best-topics=top-news&post_type=best"
+                        .into(),
+                },
+                FeedSpec {
+                    name: "NPR".into(),
+                    url: "https://feeds.npr.org/1001/rss.xml".into(),
+                },
             ],
             items_per_feed: 6,
             target_words: (150, 250),
@@ -416,7 +441,12 @@ pub struct Reflect {
 
 impl Default for Reflect {
     fn default() -> Self {
-        Self { enabled: true, turns_per_nudge: 6, idle_secs: 60, skill_creation: true }
+        Self {
+            enabled: true,
+            turns_per_nudge: 6,
+            idle_secs: 60,
+            skill_creation: true,
+        }
     }
 }
 
@@ -432,7 +462,11 @@ pub struct Research {
 
 impl Default for Research {
     fn default() -> Self {
-        Self { max_rounds: 8, timeout_secs: 300, speak_on_complete: true }
+        Self {
+            max_rounds: 8,
+            timeout_secs: 300,
+            speak_on_complete: true,
+        }
     }
 }
 
@@ -443,7 +477,11 @@ impl Config {
 
     /// Resolve a path that may be relative to the config directory.
     pub fn resolve(&self, p: &Path) -> PathBuf {
-        if p.is_absolute() { p.to_path_buf() } else { self.config_dir().join(p) }
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.config_dir().join(p)
+        }
     }
 
     pub fn config_dir(&self) -> PathBuf {
@@ -467,14 +505,50 @@ impl Config {
             self.search.mode == "turbo",
             "search.mode must be \"turbo\"; the Parallel API silently defaults to the much slower \"advanced\" mode"
         );
-        anyhow::ensure!(self.memory.core_token_cap <= 600, "memory.core_token_cap is hard-capped at 600 tokens");
-        anyhow::ensure!(self.audio.buffer_ms >= self.audio.period_ms, "audio.buffer_ms must be >= period_ms");
+        anyhow::ensure!(
+            self.memory.core_token_cap <= 600,
+            "memory.core_token_cap is hard-capped at 600 tokens"
+        );
+        anyhow::ensure!(
+            self.audio.buffer_ms >= self.audio.period_ms,
+            "audio.buffer_ms must be >= period_ms"
+        );
         anyhow::ensure!(
             self.tts.cartesia_max_buffer_delay_ms == 0,
             "tts.cartesia_max_buffer_delay_ms must be 0; the provider default of 3000ms alone \
              exceeds the 1.2s first-audio budget"
         );
+        anyhow::ensure!(
+            self.server.ws_max_connections >= 1 && self.server.ws_max_connections <= 64,
+            "server.ws_max_connections must be between 1 and 64"
+        );
+        // A WS gateway reachable beyond loopback is a remote agent controller:
+        // it can spend LLM/tool budget and (if ws_allow_listen) arm the mic.
+        // Refuse to expose that without a bearer token.
+        if !self.server.ws_bind.is_empty()
+            && !ws_bind_is_loopback(&self.server.ws_bind)
+            && crate::http::secret_opt("HERMIT_WS_TOKEN").is_none()
+        {
+            anyhow::bail!(
+                "server.ws_bind = \"{}\" is reachable beyond loopback but HERMIT_WS_TOKEN is not \
+                 set. Set the token in /etc/hermit/hermit.env (clients authenticate with an \
+                 `Authorization: Bearer <token>` header or a first-message `/auth <token>`), or \
+                 bind to 127.0.0.1.",
+                self.server.ws_bind
+            );
+        }
         Ok(())
+    }
+}
+
+/// True when a bind address can only be reached from this machine.
+pub fn ws_bind_is_loopback(bind: &str) -> bool {
+    use std::net::SocketAddr;
+    match bind.parse::<SocketAddr>() {
+        Ok(addr) => addr.ip().is_loopback(),
+        // Unparseable (e.g. a bare hostname): treat as NOT loopback so the
+        // token requirement fails closed rather than open.
+        Err(_) => false,
     }
 }
 
@@ -482,8 +556,8 @@ impl Config {
 pub fn load(path: &Path) -> Result<Config> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
-    let mut cfg: Config = toml::from_str(&text)
-        .with_context(|| format!("parsing config {}", path.display()))?;
+    let mut cfg: Config =
+        toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
     cfg.source_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     cfg.validate()?;
     Ok(cfg)
@@ -496,14 +570,21 @@ pub fn load(path: &Path) -> Result<Config> {
 pub fn watch(path: PathBuf, tx: tokio::sync::watch::Sender<Arc<Config>>) -> Result<()> {
     use notify::{EventKind, RecursiveMode, Watcher};
 
-    let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
     let (raw_tx, raw_rx) = std::sync::mpsc::channel();
 
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res
-            && matches!(ev.kind, EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)) {
-                let _ = raw_tx.send(());
-            }
+            && matches!(
+                ev.kind,
+                EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+            )
+        {
+            let _ = raw_tx.send(());
+        }
     })?;
     watcher.watch(&dir, RecursiveMode::Recursive)?;
 
@@ -523,7 +604,9 @@ pub fn watch(path: PathBuf, tx: tokio::sync::watch::Sender<Arc<Config>>) -> Resu
                         tracing::info!(path = %path.display(), "config reloaded");
                         let _ = tx.send(Arc::new(cfg));
                     }
-                    Err(e) => tracing::error!(error = ?e, "config reload failed; keeping previous config"),
+                    Err(e) => {
+                        tracing::error!(error = ?e, "config reload failed; keeping previous config")
+                    }
                 }
             }
         })?;
@@ -562,5 +645,51 @@ mod tests {
         let mut cfg = Config::default();
         cfg.memory.core_token_cap = 2000;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn ws_gateway_defaults_are_closed() {
+        // Review finding #1: the WS gateway is a control surface. The safe
+        // posture must be the default posture.
+        let cfg = Config::default();
+        assert!(super::ws_bind_is_loopback(&cfg.server.ws_bind));
+        assert!(
+            !cfg.server.ws_allow_listen,
+            "remote mic arming must be opt-in"
+        );
+        assert!(cfg.server.ws_max_connections <= 8);
+    }
+
+    #[test]
+    fn non_loopback_ws_bind_requires_a_token() {
+        // SAFETY of the env access: tests in this module run in one process;
+        // the var is cleared again before the assertion that needs it unset.
+        let mut cfg = Config::default();
+        for bind in [
+            "0.0.0.0:8765",
+            "192.168.1.10:8765",
+            "[::]:8765",
+            "myhost:8765",
+        ] {
+            cfg.server.ws_bind = bind.into();
+            unsafe { std::env::remove_var("HERMIT_WS_TOKEN") };
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains("HERMIT_WS_TOKEN"), "bind {bind}: {err}");
+        }
+        // With a token present the same bind is accepted.
+        unsafe { std::env::set_var("HERMIT_WS_TOKEN", "t0ken") };
+        cfg.server.ws_bind = "0.0.0.0:8765".into();
+        assert!(cfg.validate().is_ok());
+        unsafe { std::env::remove_var("HERMIT_WS_TOKEN") };
+    }
+
+    #[test]
+    fn loopback_binds_are_recognized() {
+        assert!(super::ws_bind_is_loopback("127.0.0.1:8765"));
+        assert!(super::ws_bind_is_loopback("[::1]:8765"));
+        assert!(!super::ws_bind_is_loopback("0.0.0.0:8765"));
+        // Fail closed on anything unparseable.
+        assert!(!super::ws_bind_is_loopback("localhost:8765"));
+        assert!(!super::ws_bind_is_loopback(""));
     }
 }

@@ -37,13 +37,19 @@ pub struct ToolOutput {
 
 impl ToolOutput {
     fn ok(content: impl Into<String>) -> Self {
-        Self { content: content.into(), ok: true }
+        Self {
+            content: content.into(),
+            ok: true,
+        }
     }
     /// Errors are returned to the model as text, not propagated as failures: the
     /// model can usually recover ("that page wouldn't load, here's what I know"),
     /// whereas aborting the turn always sounds broken to the user.
     fn err(msg: impl std::fmt::Display) -> Self {
-        Self { content: format!("Tool error: {msg}"), ok: false }
+        Self {
+            content: format!("Tool error: {msg}"),
+            ok: false,
+        }
     }
 }
 
@@ -175,7 +181,9 @@ pub async fn execute(ctx: &ToolContext, call: &ToolCall, objective: &str) -> Too
                 return ToolOutput::err("fetch_page requires a 'url' string");
             };
             let Some(client) = &ctx.fetch else {
-                return ToolOutput::err("page fetching is not configured (FIRECRAWL_API_KEY missing)");
+                return ToolOutput::err(
+                    "page fetching is not configured (FIRECRAWL_API_KEY missing)",
+                );
             };
             match client.fetch(url).await {
                 Ok(text) => ToolOutput::ok(text),
@@ -204,7 +212,9 @@ pub async fn execute(ctx: &ToolContext, call: &ToolCall, objective: &str) -> Too
             let Some(question) = args.get("question").and_then(|v| v.as_str()) else {
                 return ToolOutput::err("background_research requires a 'question' string");
             };
-            let job = research::ResearchJob { question: question.to_string() };
+            let job = research::ResearchJob {
+                question: question.to_string(),
+            };
             match ctx.research.try_send(job) {
                 Ok(()) => ToolOutput::ok(
                     "Research started in the background. Tell the user you're looking into it and \
@@ -227,22 +237,35 @@ pub async fn execute(ctx: &ToolContext, call: &ToolCall, objective: &str) -> Too
 }
 
 async fn music_action(ctx: &ToolContext, args: &serde_json::Value) -> ToolOutput {
-    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("status");
-    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("status");
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
 
     let result: anyhow::Result<String> = match action {
         "play_spotify" => {
             if query.is_empty() {
                 Err(anyhow::anyhow!("play_spotify needs a 'query'"))
             } else {
-                ctx.music.play_spotify(query).await.map(|l| format!("playing {l}"))
+                ctx.music
+                    .play_spotify(query)
+                    .await
+                    .map(|l| format!("playing {l}"))
             }
         }
         "play_station" => {
             if query.is_empty() {
                 Err(anyhow::anyhow!("play_station needs a 'query'"))
             } else {
-                ctx.music.play_station(query).await.map(|_| format!("playing {query}"))
+                ctx.music
+                    .play_station(query)
+                    .await
+                    .map(|_| format!("playing {query}"))
             }
         }
         "pause" => ctx.music.pause().await.map(|_| "paused".into()),
@@ -255,7 +278,10 @@ async fn music_action(ctx: &ToolContext, args: &serde_json::Value) -> ToolOutput
             if !(0..=100).contains(&v) {
                 Err(anyhow::anyhow!("volume must be 0-100"))
             } else {
-                ctx.music.set_volume(v as u8).await.map(|_| format!("volume {v}"))
+                ctx.music
+                    .set_volume(v as u8)
+                    .await
+                    .map(|_| format!("volume {v}"))
             }
         }
         "status" => Ok(ctx.music.status().await),

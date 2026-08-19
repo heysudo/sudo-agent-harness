@@ -5,7 +5,8 @@
 //! 1. **Nudges** — every 6 turns or 60 s idle, send the recent user/assistant turns
 //!    to Cerebras with an extraction prompt and store what comes back as facts.
 //! 2. **Skill distillation** — after a successful multi-step tool run, write a
-//!    procedural note to `skills/`.
+//!    procedural DRAFT to `<data_dir>/skills-pending/` for operator review
+//!    (quarantined; see [`ReflectionWorker::distill_skill`]).
 //! 3. **Nightly consolidation** — summarize sessions, rewrite `core.md`, decay
 //!    importance, prune. Keeps the prompt and the index bounded forever.
 //!
@@ -30,7 +31,11 @@ pub enum ReflectSignal {
     /// A user/assistant exchange completed.
     TurnCompleted,
     /// A multi-step tool run succeeded and is worth distilling into a skill.
-    SkillCandidate { goal: String, tools_used: Vec<String>, answer: String },
+    SkillCandidate {
+        goal: String,
+        tools_used: Vec<String>,
+        answer: String,
+    },
     /// Run consolidation now (the nightly timer, or `hermit consolidate`).
     Consolidate,
 }
@@ -75,7 +80,11 @@ impl ReflectionWorker {
                         last_reflected_id = self.nudge(&cfg, last_reflected_id).await;
                     }
                 }
-                Ok(Some(ReflectSignal::SkillCandidate { goal, tools_used, answer })) => {
+                Ok(Some(ReflectSignal::SkillCandidate {
+                    goal,
+                    tools_used,
+                    answer,
+                })) => {
                     if cfg.reflect.skill_creation
                         && let Err(e) = self.distill_skill(&cfg, &goal, &tools_used, &answer).await
                     {
@@ -120,7 +129,10 @@ impl ReflectionWorker {
                 if batch.is_empty() {
                     tracing::debug!("reflection found nothing worth storing");
                 } else {
-                    match self.store.apply_reflection(&batch, cfg.memory.dedupe_similarity) {
+                    match self
+                        .store
+                        .apply_reflection(&batch, cfg.memory.dedupe_similarity)
+                    {
                         Ok(n) => tracing::info!(
                             proposed = batch.facts().len(),
                             stored = n,
@@ -152,6 +164,20 @@ impl ReflectionWorker {
     }
 
     /// Write a procedural note describing a multi-step run that worked.
+    ///
+    /// # Quarantine (security)
+    ///
+    /// The draft transits the model's own output, which may echo instructions
+    /// from a poisoned web page ("second-order prompt injection"). The memory
+    /// firewall cannot see that path, so drafts are **quarantined**: written to
+    /// `<data_dir>/skills-pending/`, which is NEVER indexed into recall. A
+    /// human promotes a reviewed draft into `<config_dir>/skills/` (root-owned
+    /// on a provisioned device) before it can ever enter a system prompt.
+    /// `tests/skill_quarantine.rs` is the acceptance gate for this property.
+    ///
+    /// This also fixes a deploy mismatch: `<config_dir>` is deliberately
+    /// read-only to the daemon on provisioned hardware, so writing drafts
+    /// there silently failed. `<data_dir>` is the daemon's writable state dir.
     async fn distill_skill(
         &self,
         cfg: &Config,
@@ -178,15 +204,16 @@ impl ReflectionWorker {
             bail!("skill distillation produced nothing");
         }
 
-        let dir = cfg.config_dir().join("skills");
-        std::fs::create_dir_all(&dir)?;
-        let name = slugify(goal);
-        let path = dir.join(format!("{name}.md"));
-        std::fs::write(&path, body.trim())
-            .with_context(|| format!("writing skill {}", path.display()))?;
-        tracing::info!(path = %path.display(), "distilled a new skill");
+        let path = write_skill_draft(cfg, goal, &body)?;
+        tracing::info!(
+            path = %path.display(),
+            "distilled a skill DRAFT (quarantined; review and move into {} to activate)",
+            cfg.config_dir().join("skills").display()
+        );
 
-        self.store.reindex_skills(&dir)?;
+        // Deliberately NO reindex here: only operator-promoted skills in the
+        // config dir are indexed (at boot and on file-watch). Model output must
+        // never reach the system prompt without a human in the loop.
         Ok(())
     }
 
@@ -256,15 +283,23 @@ impl ReflectionWorker {
                         "core memory rewritten"
                     );
                 }
-                Ok(_) => tracing::warn!("consolidation returned an empty core memory; keeping the old one"),
+                Ok(_) => tracing::warn!(
+                    "consolidation returned an empty core memory; keeping the old one"
+                ),
                 Err(e) => tracing::warn!(error = %e, "core rewrite failed; keeping the old one"),
             }
         }
 
         // 3. Decay and prune.
-        let (decayed, pruned) =
-            self.store.decay_and_prune(cfg.memory.importance_decay, cfg.memory.prune_below)?;
-        tracing::info!(decayed, pruned, remaining = self.store.fact_count(), "decay complete");
+        let (decayed, pruned) = self
+            .store
+            .decay_and_prune(cfg.memory.importance_decay, cfg.memory.prune_below)?;
+        tracing::info!(
+            decayed,
+            pruned,
+            remaining = self.store.fact_count(),
+            "decay complete"
+        );
 
         // 4. Reclaim space; the SD card is the scarcest resource here.
         if pruned > 0 {
@@ -301,7 +336,9 @@ pub fn parse_extraction(raw: &str) -> Result<ReflectionBatch> {
     let mut facts = Vec::new();
     if let Some(arr) = v.get("facts").and_then(|f| f.as_array()) {
         for item in arr {
-            let Some(text) = item.get("text").and_then(|t| t.as_str()) else { continue };
+            let Some(text) = item.get("text").and_then(|t| t.as_str()) else {
+                continue;
+            };
             let text = text.trim();
             // Bound length: a "fact" the size of a web page is a sign something
             // went wrong upstream, and it would poison the prompt budget.
@@ -324,7 +361,11 @@ pub fn parse_extraction(raw: &str) -> Result<ReflectionBatch> {
                 .and_then(|i| i.as_f64())
                 .unwrap_or(0.5)
                 .clamp(0.0, 1.0);
-            facts.push(CandidateFact { text: text.to_string(), tags, importance });
+            facts.push(CandidateFact {
+                text: text.to_string(),
+                tags,
+                importance,
+            });
         }
     }
 
@@ -404,16 +445,45 @@ fn extract_json_object(raw: &str) -> Option<String> {
     None
 }
 
+/// Where model-drafted skills wait for human review. Under the daemon's
+/// writable data dir — never under config, which stays read-only to the
+/// daemon on provisioned hardware, and never indexed into recall.
+pub fn skill_quarantine_dir(cfg: &Config) -> std::path::PathBuf {
+    cfg.paths.data_dir.join("skills-pending")
+}
+
+/// Persist a model-drafted skill into quarantine. The single write path for
+/// drafts: everything it produces stays outside the recall index until an
+/// operator moves it into `<config_dir>/skills/` by hand.
+pub fn write_skill_draft(cfg: &Config, goal: &str, body: &str) -> Result<std::path::PathBuf> {
+    let dir = skill_quarantine_dir(cfg);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.md", slugify(goal)));
+    std::fs::write(&path, body.trim())
+        .with_context(|| format!("writing skill draft {}", path.display()))?;
+    Ok(path)
+}
+
 fn slugify(s: &str) -> String {
     let mut out: String = s
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     while out.contains("--") {
         out = out.replace("--", "-");
     }
     let trimmed = out.trim_matches('-').to_string();
-    let slug = if trimmed.is_empty() { "skill".to_string() } else { trimmed };
+    let slug = if trimmed.is_empty() {
+        "skill".to_string()
+    } else {
+        trimmed
+    };
     slug.chars().take(60).collect()
 }
 
@@ -423,7 +493,8 @@ mod tests {
 
     #[test]
     fn parses_a_clean_extraction() {
-        let raw = r#"{"facts":[{"text":"user's dog is named Ada","tags":["pets"],"importance":0.9}]}"#;
+        let raw =
+            r#"{"facts":[{"text":"user's dog is named Ada","tags":["pets"],"importance":0.9}]}"#;
         let b = parse_extraction(raw).unwrap();
         assert_eq!(b.facts().len(), 1);
         assert_eq!(b.facts()[0].text, "user's dog is named Ada");
@@ -437,7 +508,10 @@ mod tests {
         let b = parse_extraction(raw).unwrap();
         assert_eq!(b.facts().len(), 1);
         assert_eq!(b.facts()[0].text, "user drinks tea");
-        assert!((b.facts()[0].importance - 0.5).abs() < 1e-9, "missing importance defaults to 0.5");
+        assert!(
+            (b.facts()[0].importance - 0.5).abs() < 1e-9,
+            "missing importance defaults to 0.5"
+        );
     }
 
     #[test]
@@ -479,7 +553,11 @@ mod tests {
     fn importance_is_clamped() {
         let raw = r#"{"facts":[{"text":"a","importance":7.5},{"text":"b","importance":-3}]}"#;
         let b = parse_extraction(raw).unwrap();
-        assert!(b.facts().iter().all(|f| (0.0..=1.0).contains(&f.importance)));
+        assert!(
+            b.facts()
+                .iter()
+                .all(|f| (0.0..=1.0).contains(&f.importance))
+        );
     }
 
     #[test]
@@ -508,7 +586,10 @@ mod tests {
 
     #[test]
     fn slugify_produces_safe_filenames() {
-        assert_eq!(slugify("Check a flight's status!"), "check-a-flight-s-status");
+        assert_eq!(
+            slugify("Check a flight's status!"),
+            "check-a-flight-s-status"
+        );
         assert_eq!(slugify("   "), "skill");
         assert_eq!(slugify("///"), "skill");
         assert!(slugify(&"long ".repeat(50)).len() <= 60);

@@ -94,7 +94,10 @@ impl ResearchWorker {
                 "background research complete"
             );
             if announce
-                .send(Announcement { text, about: job.question })
+                .send(Announcement {
+                    text,
+                    about: job.question,
+                })
                 .await
                 .is_err()
             {
@@ -207,7 +210,10 @@ mod tests {
             !names.contains(&"background_research".to_string()),
             "a research job must never be able to spawn another"
         );
-        assert!(!names.contains(&"music".to_string()), "researcher has no business changing playback");
+        assert!(
+            !names.contains(&"music".to_string()),
+            "researcher has no business changing playback"
+        );
     }
 
     #[test]

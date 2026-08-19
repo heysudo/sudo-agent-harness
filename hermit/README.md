@@ -40,7 +40,7 @@ colima start`).
 ```bash
 cd hermit
 scripts/build-pi.sh                 # -> target/aarch64-unknown-linux-gnu/release/hermit
-scripts/deploy.sh <pi-host>        # rsync binary + config + firmware to the Pi
+scripts/deploy.sh <pi-host>         # rsync binary + config + firmware to the Pi
 ```
 
 `build-pi.sh` picks the right path for your host. **On Apple Silicon `cross` does not
@@ -80,7 +80,7 @@ fighting. The daemon publishes its actual volume in `live.json`; the console
 gauge shows that truth, marking a not-yet-acknowledged request with `*`.
 
 ```bash
-cargo test            # 232 tests, no network or API keys needed
+cargo test            # 241 tests, no network or API keys needed
 cargo run -- check --config config/hermit.toml   # validate config
 ```
 
@@ -214,7 +214,7 @@ Two more field notes that cost real time:
 
 ## Verification status
 
-**Verified here** — 232 tests pass on the dev machine with no network and no API keys:
+**Verified here** — 241 tests pass on the dev machine with no network and no API keys:
 the chunker, router, memory and firewall, tool schemas and dispatch, SSE decoding and
 streaming tool-call reassembly, the 2-round cap, mpv IPC (against a fake mpv speaking
 the real dialect), audio mixing and barge-in generation logic, and the Cartesia/

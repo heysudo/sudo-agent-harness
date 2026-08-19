@@ -50,28 +50,70 @@ macro_rules! re {
 }
 
 // Leading filler we strip before matching: wake-word residue and politeness.
-re!(FILLER, r"^(?:hey |ok |okay |hermit[, ]+|computer[, ]+|please |could you |can you |would you |will you )+");
+re!(
+    FILLER,
+    r"^(?:hey |ok |okay |hermit[, ]+|computer[, ]+|please |could you |can you |would you |will you )+"
+);
 
-re!(R_PAUSE,      r"^(?:pause|hold on|hold up|wait)(?: the)?(?: music| song| track| playback)?$");
-re!(R_RESUME,     r"^(?:resume|unpause|continue|keep going|play)(?: the)?(?: music| song| track| playback)?$");
-re!(R_STOP,       r"^(?:stop|kill|shut off|turn off|quit)(?: the)?(?: music| song| track| playback| radio| audio)$");
-re!(R_STOP_BARE,  r"^(?:stop|shut up|be quiet|silence|nevermind|never mind|cancel)$");
+re!(
+    R_PAUSE,
+    r"^(?:pause|hold on|hold up|wait)(?: the)?(?: music| song| track| playback)?$"
+);
+re!(
+    R_RESUME,
+    r"^(?:resume|unpause|continue|keep going|play)(?: the)?(?: music| song| track| playback)?$"
+);
+re!(
+    R_STOP,
+    r"^(?:stop|kill|shut off|turn off|quit)(?: the)?(?: music| song| track| playback| radio| audio)$"
+);
+re!(
+    R_STOP_BARE,
+    r"^(?:stop|shut up|be quiet|silence|nevermind|never mind|cancel)$"
+);
 // Built compositionally rather than as a flat alternation: a flat list like
 // `(?:skip|skip this song)` anchored with `$` fails on the longer form because the
 // shorter branch matches first and the anchor then rejects the remainder.
-re!(R_NEXT,       r"^(?:next|skip|forward)(?: (?:this|it|the))?(?: (?:song|track|one))?$");
-re!(R_PREV,       r"^(?:previous|prev|back|go back|last)(?: (?:this|the))?(?: (?:song|track|one))?$");
-re!(R_VOL_UP,     r"^(?:volume up|turn (?:it |the volume )?up|louder|crank it|raise the volume)$");
-re!(R_VOL_DOWN,   r"^(?:volume down|turn (?:it |the volume )?down|quieter|softer|lower the volume)$");
-re!(R_VOL_SET,    r"^(?:set )?volume(?: to| at)? (\d{1,3})(?: percent)?$");
-re!(R_MUTE,       r"^(?:mute|mute (?:it|the music|yourself))$");
-re!(R_UNMUTE,     r"^(?:unmute|unmute (?:it|the music))$");
-re!(R_TIME,       r"^(?:what(?:'s| is) the time|what time is it|time please|got the time|the time)$");
-re!(R_NOWPLAYING, r"^(?:what(?:'s| is) (?:playing|this|this song)|now playing|what song is this|who(?:'s| is) this)$");
+re!(
+    R_NEXT,
+    r"^(?:next|skip|forward)(?: (?:this|it|the))?(?: (?:song|track|one))?$"
+);
+re!(
+    R_PREV,
+    r"^(?:previous|prev|back|go back|last)(?: (?:this|the))?(?: (?:song|track|one))?$"
+);
+re!(
+    R_VOL_UP,
+    r"^(?:volume up|turn (?:it |the volume )?up|louder|crank it|raise the volume)$"
+);
+re!(
+    R_VOL_DOWN,
+    r"^(?:volume down|turn (?:it |the volume )?down|quieter|softer|lower the volume)$"
+);
+re!(
+    R_VOL_SET,
+    r"^(?:set )?volume(?: to| at)? (\d{1,3})(?: percent)?$"
+);
+re!(R_MUTE, r"^(?:mute|mute (?:it|the music|yourself))$");
+re!(R_UNMUTE, r"^(?:unmute|unmute (?:it|the music))$");
+re!(
+    R_TIME,
+    r"^(?:what(?:'s| is) the time|what time is it|time please|got the time|the time)$"
+);
+re!(
+    R_NOWPLAYING,
+    r"^(?:what(?:'s| is) (?:playing|this|this song)|now playing|what song is this|who(?:'s| is) this)$"
+);
 
 // "play <query> on spotify"  /  "play <query> on the radio|station"
-re!(R_PLAY_SPOTIFY, r"^play (.+?) on (?:spotify|spotify connect)$");
-re!(R_PLAY_STATION, r"^play (?:the )?(.+?) (?:on (?:the )?)?(?:radio|station|stream)$");
+re!(
+    R_PLAY_SPOTIFY,
+    r"^play (.+?) on (?:spotify|spotify connect)$"
+);
+re!(
+    R_PLAY_STATION,
+    r"^play (?:the )?(.+?) (?:on (?:the )?)?(?:radio|station|stream)$"
+);
 // "play <station name>" where the name resolves against stations.toml — handled by
 // the caller via `station_names`, since we cannot know the map here.
 re!(R_PLAY_ANY, r"^play (?:some |the )?(.+)$");
@@ -190,11 +232,22 @@ fn match_station(target: &str, names: &[String]) -> Option<String> {
 /// should not pay a round trip.
 fn looks_like_media_title(s: &str) -> bool {
     const VAGUE: &[&str] = &[
-        "something", "anything", "some music", "a song", "music", "songs",
-        "whatever", "stuff", "tunes", "a playlist",
+        "something",
+        "anything",
+        "some music",
+        "a song",
+        "music",
+        "songs",
+        "whatever",
+        "stuff",
+        "tunes",
+        "a playlist",
     ];
     let low = s.to_lowercase();
-    if VAGUE.iter().any(|v| low == *v || low.starts_with(&format!("{v} "))) {
+    if VAGUE
+        .iter()
+        .any(|v| low == *v || low.starts_with(&format!("{v} ")))
+    {
         return false;
     }
     // "X by Y" and multi-word proper-ish names are concrete enough.
@@ -205,7 +258,10 @@ fn looks_like_media_title(s: &str) -> bool {
 // Classification helpers used by the orchestrator
 // ---------------------------------------------------------------------------
 
-re!(R_RESEARCH, r"(?:^|\b)(?:research|deep dive|deep-dive|dig into|investigate|comprehensive|thorough(?:ly)?|write me a report|full report|analyz[e]? in depth|in depth)\b");
+re!(
+    R_RESEARCH,
+    r"(?:^|\b)(?:research|deep dive|deep-dive|dig into|investigate|comprehensive|thorough(?:ly)?|write me a report|full report|analyz[e]? in depth|in depth)\b"
+);
 
 /// Should this query use `reasoning_effort=medium` and be eligible for the
 /// background research path (spec §4.3, §5)?
@@ -213,7 +269,10 @@ pub fn is_research(input: &str) -> bool {
     R_RESEARCH.is_match(&input.to_lowercase())
 }
 
-re!(R_LOOKUP, r"^(?:what|what's|whats|who|who's|whos|when|where|which|how much|how many|latest|current|price|score|news|weather|is there|are there|did|does|has|show me|tell me about|look up|search)\b");
+re!(
+    R_LOOKUP,
+    r"^(?:what|what's|whats|who|who's|whos|when|where|which|how much|how many|latest|current|price|score|news|weather|is there|are there|did|does|has|show me|tell me about|look up|search)\b"
+);
 
 /// Speculative prefetch gate (spec §5): fire a provisional Turbo search before
 /// end-of-speech when the interim transcript looks like a lookup and is long
@@ -254,7 +313,10 @@ mod tests {
     fn wake_residue_and_politeness_are_stripped() {
         assert_eq!(dev("Hey Hermit, pause"), DeviceCommand::Pause);
         assert_eq!(dev("computer, next"), DeviceCommand::Next);
-        assert_eq!(dev("could you please pause the music?"), DeviceCommand::Pause);
+        assert_eq!(
+            dev("could you please pause the music?"),
+            DeviceCommand::Pause
+        );
     }
 
     #[test]
@@ -279,7 +341,10 @@ mod tests {
             DeviceCommand::PlaySpotify("miles davis".into())
         );
         assert_eq!(dev("play npr"), DeviceCommand::PlayStation("npr".into()));
-        assert_eq!(dev("play jazz24 radio"), DeviceCommand::PlayStation("jazz24".into()));
+        assert_eq!(
+            dev("play jazz24 radio"),
+            DeviceCommand::PlayStation("jazz24".into())
+        );
         assert_eq!(
             dev("play kind of blue by miles davis"),
             DeviceCommand::PlaySpotify("kind of blue by miles davis".into())
@@ -290,7 +355,10 @@ mod tests {
     fn vague_play_requests_go_to_the_agent() {
         // "play something relaxing" needs judgement; don't guess on the fast path.
         assert_eq!(route("play something relaxing", &stations()), Route::Agent);
-        assert_eq!(route("play some music that fits a rainy afternoon", &stations()), Route::Agent);
+        assert_eq!(
+            route("play some music that fits a rainy afternoon", &stations()),
+            Route::Agent
+        );
     }
 
     #[test]
@@ -308,7 +376,11 @@ mod tests {
             "remind me what I said about the boiler",
             "what time does the pharmacy close", // NOT the local-clock command
         ] {
-            assert_eq!(route(q, &stations()), Route::Agent, "{q} should reach the LLM");
+            assert_eq!(
+                route(q, &stations()),
+                Route::Agent,
+                "{q} should reach the LLM"
+            );
         }
     }
 
@@ -330,7 +402,10 @@ mod tests {
         assert!(should_prefetch("what is the current price of"));
         assert!(should_prefetch("who won the world cup"));
         assert!(!should_prefetch("what is"), "too short");
-        assert!(!should_prefetch("tell me a joke about cats"), "not a lookup");
+        assert!(
+            !should_prefetch("tell me a joke about cats"),
+            "not a lookup"
+        );
         assert!(!should_prefetch(""), "empty");
     }
 

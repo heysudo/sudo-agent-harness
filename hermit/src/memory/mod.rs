@@ -107,18 +107,26 @@ impl Store {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("creating data dir {}", data_dir.display()))?;
         let db_path = data_dir.join("hermit.db");
-        let conn = Connection::open(&db_path)
-            .with_context(|| format!("opening {}", db_path.display()))?;
+        let conn =
+            Connection::open(&db_path).with_context(|| format!("opening {}", db_path.display()))?;
 
-        conn.execute_batch(schema::PRAGMAS).context("applying pragmas")?;
+        conn.execute_batch(schema::PRAGMAS)
+            .context("applying pragmas")?;
         Self::assert_fts5(&conn)?;
         Self::migrate(&conn)?;
 
         let now = now_ts();
-        conn.execute("INSERT INTO sessions (started_at) VALUES (?1)", params![now])?;
+        conn.execute(
+            "INSERT INTO sessions (started_at) VALUES (?1)",
+            params![now],
+        )?;
         let session_id = conn.last_insert_rowid();
 
-        Ok(Self { conn: Mutex::new(conn), data_dir: data_dir.to_path_buf(), session_id })
+        Ok(Self {
+            conn: Mutex::new(conn),
+            data_dir: data_dir.to_path_buf(),
+            session_id,
+        })
     }
 
     /// In-memory store for tests.
@@ -128,7 +136,10 @@ impl Store {
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY;")?;
         Self::assert_fts5(&conn)?;
         Self::migrate(&conn)?;
-        conn.execute("INSERT INTO sessions (started_at) VALUES (?1)", params![now_ts()])?;
+        conn.execute(
+            "INSERT INTO sessions (started_at) VALUES (?1)",
+            params![now_ts()],
+        )?;
         let session_id = conn.last_insert_rowid();
         Ok(Self {
             conn: Mutex::new(conn),
@@ -139,17 +150,20 @@ impl Store {
 
     /// Fail loudly at boot rather than mysteriously at first recall.
     fn assert_fts5(conn: &Connection) -> Result<()> {
-        conn.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_probe USING fts5(x); DROP TABLE _fts5_probe;")
-            .context(
-                "SQLite was built without FTS5. Rebuild with the rusqlite `bundled` feature \
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_probe USING fts5(x); DROP TABLE _fts5_probe;",
+        )
+        .context(
+            "SQLite was built without FTS5. Rebuild with the rusqlite `bundled` feature \
                  (which enables SQLITE_ENABLE_FTS5) — recall depends on it.",
-            )?;
+        )?;
         Ok(())
     }
 
     fn migrate(conn: &Connection) -> Result<()> {
-        let version: i64 =
-            conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0);
         for (i, sql) in schema::MIGRATIONS.iter().enumerate() {
             let target = i as i64 + 1;
             if version < target {
@@ -182,7 +196,10 @@ impl Store {
     pub fn recall(&self, utterance: &str, n_facts: usize, n_skills: usize) -> Recall {
         let started = Instant::now();
         let Some(query) = fts_query(utterance) else {
-            return Recall { elapsed_ms: crate::metrics::ms_since(started), ..Default::default() };
+            return Recall {
+                elapsed_ms: crate::metrics::ms_since(started),
+                ..Default::default()
+            };
         };
 
         let conn = match self.conn.lock() {
@@ -209,7 +226,11 @@ impl Store {
             let _ = conn.execute(&sql, params![now_ts()]);
         }
 
-        Recall { facts, skills, elapsed_ms: crate::metrics::ms_since(started) }
+        Recall {
+            facts,
+            skills,
+            elapsed_ms: crate::metrics::ms_since(started),
+        }
     }
 
     // -----------------------------------------------------------------
@@ -268,7 +289,11 @@ impl Store {
             return Vec::new();
         };
         stmt.query_map(params![after_id, limit as i64], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         })
         .and_then(|it| it.collect::<rusqlite::Result<Vec<_>>>())
         .unwrap_or_default()
@@ -276,8 +301,10 @@ impl Store {
 
     pub fn max_message_id(&self) -> i64 {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-        conn.query_row("SELECT COALESCE(MAX(id), 0) FROM messages", [], |r| r.get(0))
-            .unwrap_or(0)
+        conn.query_row("SELECT COALESCE(MAX(id), 0) FROM messages", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(0)
     }
 
     // -----------------------------------------------------------------
@@ -287,7 +314,11 @@ impl Store {
     /// Apply a reflection batch. The single write path for facts.
     ///
     /// Returns the number of facts actually inserted (duplicates are dropped).
-    pub fn apply_reflection(&self, batch: &ReflectionBatch, dedupe_similarity: f64) -> Result<usize> {
+    pub fn apply_reflection(
+        &self,
+        batch: &ReflectionBatch,
+        dedupe_similarity: f64,
+    ) -> Result<usize> {
         if batch.is_empty() {
             return Ok(0);
         }
@@ -326,7 +357,10 @@ impl Store {
             )?;
         }
         for id in &batch.retire {
-            tx.execute("DELETE FROM facts WHERE id = ?1 AND pinned = 0", params![id])?;
+            tx.execute(
+                "DELETE FROM facts WHERE id = ?1 AND pinned = 0",
+                params![id],
+            )?;
         }
 
         tx.commit()?;
@@ -357,7 +391,11 @@ impl Store {
                         continue;
                     }
                 };
-                let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("skill").to_string();
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("skill")
+                    .to_string();
                 let goal = extract_goal(&body);
                 tx.execute(
                     "INSERT INTO skills_fts (name, goal, body, path) VALUES (?1, ?2, ?3, ?4)",
@@ -405,7 +443,8 @@ impl Store {
 
     pub fn fact_count(&self) -> i64 {
         let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
-        conn.query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0)).unwrap_or(0)
+        conn.query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+            .unwrap_or(0)
     }
 
     /// Sessions that have not been summarized yet.
@@ -588,10 +627,10 @@ fn containment(
 /// Returns `None` when nothing usable remains, so the caller can skip the query.
 pub fn fts_query(input: &str) -> Option<String> {
     const STOP: &[&str] = &[
-        "the", "a", "an", "and", "or", "but", "is", "are", "was", "were", "be", "been",
-        "to", "of", "in", "on", "at", "for", "with", "my", "me", "i", "you", "it", "its",
-        "that", "this", "do", "does", "did", "what", "whats", "how", "can", "could",
-        "please", "would", "should", "am", "if", "so", "as", "by", "from",
+        "the", "a", "an", "and", "or", "but", "is", "are", "was", "were", "be", "been", "to", "of",
+        "in", "on", "at", "for", "with", "my", "me", "i", "you", "it", "its", "that", "this", "do",
+        "does", "did", "what", "whats", "how", "can", "could", "please", "would", "should", "am",
+        "if", "so", "as", "by", "from",
     ];
 
     let mut tokens: Vec<String> = Vec::new();
@@ -694,7 +733,8 @@ mod tests {
     #[test]
     fn hostile_input_does_not_break_recall() {
         let s = Store::open_in_memory().unwrap();
-        s.apply_reflection(&batch(vec![("user likes strong coffee", 0.8)]), 0.8).unwrap();
+        s.apply_reflection(&batch(vec![("user likes strong coffee", 0.8)]), 0.8)
+            .unwrap();
         // Every one of these would be an FTS5 syntax error if passed raw.
         for hostile in [
             "\" OR 1=1 --",
@@ -732,12 +772,25 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         // Seed a corpus far larger than a real device would accumulate.
         let facts: Vec<(String, f64)> = (0..2000)
-            .map(|i| (format!("fact number {i} about topic {} and subject {}", i % 37, i % 11), 0.5))
+            .map(|i| {
+                (
+                    format!(
+                        "fact number {i} about topic {} and subject {}",
+                        i % 37,
+                        i % 11
+                    ),
+                    0.5,
+                )
+            })
             .collect();
         let b = ReflectionBatch {
             facts: facts
                 .iter()
-                .map(|(t, i)| CandidateFact { text: t.clone(), tags: vec![], importance: *i })
+                .map(|(t, i)| CandidateFact {
+                    text: t.clone(),
+                    tags: vec![],
+                    importance: *i,
+                })
                 .collect(),
             importance_updates: vec![],
             retire: vec![],
@@ -750,7 +803,10 @@ mod tests {
         // Warm the prepared-statement cache, then measure.
         let _ = s.recall("topic 12 subject 3", 5, 2);
         let mut samples: Vec<f64> = (0..50)
-            .map(|_| s.recall("tell me about topic 12 and subject 3", 5, 2).elapsed_ms)
+            .map(|_| {
+                s.recall("tell me about topic 12 and subject 3", 5, 2)
+                    .elapsed_ms
+            })
             .collect();
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let p50 = samples[samples.len() / 2];
@@ -760,14 +816,21 @@ mod tests {
         // makes this flaky on a loaded build machine (an OS scheduler hiccup is not
         // a regression), so gate on p50 and keep a loose ceiling to catch genuine
         // blowups.
-        assert!(p50 < 5.0, "p50 recall was {p50:.2}ms over a 2000-fact corpus (gate: 5ms)");
-        assert!(p95 < 25.0, "p95 recall was {p95:.2}ms — that is a real regression");
+        assert!(
+            p50 < 5.0,
+            "p50 recall was {p50:.2}ms over a 2000-fact corpus (gate: 5ms)"
+        );
+        assert!(
+            p95 < 25.0,
+            "p95 recall was {p95:.2}ms — that is a real regression"
+        );
     }
 
     #[test]
     fn dedupe_blocks_near_duplicates() {
         let s = Store::open_in_memory().unwrap();
-        s.apply_reflection(&batch(vec![("the user's dog is named Ada", 0.9)]), 0.8).unwrap();
+        s.apply_reflection(&batch(vec![("the user's dog is named Ada", 0.9)]), 0.8)
+            .unwrap();
         let inserted = s
             .apply_reflection(&batch(vec![("user dog named Ada", 0.9)]), 0.8)
             .unwrap();
@@ -777,7 +840,9 @@ mod tests {
     #[test]
     fn tool_role_messages_are_refused() {
         let s = Store::open_in_memory().unwrap();
-        let err = s.record_message("tool", "<injected instructions from a web page>").unwrap_err();
+        let err = s
+            .record_message("tool", "<injected instructions from a web page>")
+            .unwrap_err();
         assert!(err.to_string().contains("firewall"));
         assert!(s.recent_messages(10).is_empty());
     }
@@ -795,9 +860,17 @@ mod tests {
     #[test]
     fn decay_and_prune_respects_pinning() {
         let s = Store::open_in_memory().unwrap();
-        s.apply_reflection(&batch(vec![("low value trivia", 0.16), ("pinned truth", 0.16)]), 2.0)
-            .unwrap();
-        let pinned_id = s.top_facts(10).iter().find(|f| f.text == "pinned truth").unwrap().id;
+        s.apply_reflection(
+            &batch(vec![("low value trivia", 0.16), ("pinned truth", 0.16)]),
+            2.0,
+        )
+        .unwrap();
+        let pinned_id = s
+            .top_facts(10)
+            .iter()
+            .find(|f| f.text == "pinned truth")
+            .unwrap()
+            .id;
         s.set_pinned(pinned_id, true).unwrap();
 
         // 0.16 * 0.98 = 0.1568 -> above 0.15; run enough rounds to cross the floor.
@@ -812,7 +885,8 @@ mod tests {
     #[test]
     fn importance_clamps_to_unit_range() {
         let s = Store::open_in_memory().unwrap();
-        s.apply_reflection(&batch(vec![("wild importance", 9.9)]), 2.0).unwrap();
+        s.apply_reflection(&batch(vec![("wild importance", 9.9)]), 2.0)
+            .unwrap();
         assert!(s.top_facts(1)[0].importance <= 1.0);
     }
 

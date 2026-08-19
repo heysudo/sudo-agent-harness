@@ -61,8 +61,9 @@ SupplementaryGroups=audio hermit-console
 EnvironmentFile=/etc/hermit/hermit.env
 
 # Sane logging defaults; override per-deployment in hermit.env if needed.
+# No RUST_BACKTRACE here: backtraces in journald leak internal paths/layout on
+# a hardened unit. Set it in hermit.env temporarily when debugging a crash.
 Environment=RUST_LOG=info
-Environment=RUST_BACKTRACE=1
 
 WorkingDirectory=/opt/hermit
 ExecStartPre=+/usr/bin/install -d -o root -g hermit-console -m 0750 /run/hermit-console

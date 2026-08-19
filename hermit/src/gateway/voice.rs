@@ -369,9 +369,7 @@ async fn transcribe_and_answer(
                 // corrected text and the confident language tag — instead of
                 // answering off the rougher interim.
                 let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
-                while let Ok(Some(late)) =
-                    tokio::time::timeout_at(deadline, events.recv()).await
-                {
+                while let Ok(Some(late)) = tokio::time::timeout_at(deadline, events.recv()).await {
                     let is_final = matches!(late, SttEvent::Final(_));
                     builder.apply(&late);
                     if is_final {

@@ -556,7 +556,7 @@ streaming TTS pipeline — is dramatically harder than debugging them here with
 
 ---
 
-## Results — session log (2026-08-18, <pi-host>)
+## Results — session log (2026-08-18, reference device)
 
 Findings recorded live during bring-up. Anything still blank is genuinely not yet
 measured; do not treat a blank as a pass.
@@ -567,7 +567,7 @@ measured; do not treat a blank as a pass.
 |---|---|---|
 | Device | Raspberry Pi 4 Model B Rev 1.5, 905 MB usable | |
 | OS | **Debian 13 (trixie)**, not Bookworm | binary built on bookworm (glibc 2.36) runs fine on 2.41 — forward compat |
-| Network | **wlan0**, <redacted-lan-ip>; eth0 DOWN | spec prefers Ethernet; Wi-Fi jitter is in every number below |
+| Network | **wlan0**; eth0 DOWN | spec prefers Ethernet; Wi-Fi jitter is in every number below |
 | Power | under-voltage logged at boot (`0x50005` → `0x50000`) | 40 °C, so power not thermal. Confirm 5.1 V/3 A PSU. |
 | dpkg state | interrupted dist-upgrade found; repaired with `dpkg --configure -a` | caused by the power loss; blocked ALL package installs |
 

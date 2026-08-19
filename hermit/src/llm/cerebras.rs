@@ -101,7 +101,9 @@ impl CerebrasClient {
                 let event = match event {
                     Ok(e) => e,
                     Err(e) => {
-                        let _ = tx.send(Err(anyhow::anyhow!("sse transport error: {e}"))).await;
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!("sse transport error: {e}")))
+                            .await;
                         return;
                     }
                 };
@@ -119,7 +121,9 @@ impl CerebrasClient {
                     }
                 };
 
-                let Some(choice) = chunk.choices.into_iter().next() else { continue };
+                let Some(choice) = chunk.choices.into_iter().next() else {
+                    continue;
+                };
 
                 if let Some(reason) = choice.finish_reason {
                     finish_reason = Some(reason);
@@ -244,7 +248,11 @@ impl ToolCallAccumulator {
             .enumerate()
             .filter(|(_, s)| !s.name.is_empty())
             .map(|(i, s)| ToolCall {
-                id: if s.id.is_empty() { format!("call_{i}") } else { s.id },
+                id: if s.id.is_empty() {
+                    format!("call_{i}")
+                } else {
+                    s.id
+                },
                 name: s.name,
                 arguments: s.arguments,
             })
@@ -318,7 +326,12 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         // Respect char boundaries so this never panics on UTF-8 payloads.
-        let end = s.char_indices().map(|(i, _)| i).take_while(|i| *i <= max).last().unwrap_or(0);
+        let end = s
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|i| *i <= max)
+            .last()
+            .unwrap_or(0);
         format!("{}…", &s[..end])
     }
 }
@@ -327,7 +340,12 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    fn delta(index: u32, id: Option<&str>, name: Option<&str>, args: Option<&str>) -> ToolCallDelta {
+    fn delta(
+        index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        args: Option<&str>,
+    ) -> ToolCallDelta {
         ToolCallDelta {
             index: Some(index),
             id: id.map(String::from),
@@ -372,7 +390,11 @@ mod tests {
     #[test]
     fn drops_slots_with_no_function_name() {
         let mut acc = ToolCallAccumulator::default();
-        acc.absorb(vec![ToolCallDelta { index: Some(0), id: Some("x".into()), function: None }]);
+        acc.absorb(vec![ToolCallDelta {
+            index: Some(0),
+            id: Some("x".into()),
+            function: None,
+        }]);
         assert!(acc.finish().is_empty());
     }
 

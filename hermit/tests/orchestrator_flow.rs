@@ -34,7 +34,9 @@ async fn stub_llm(script: Vec<Scripted>) -> (String, Arc<AtomicUsize>) {
 
     tokio::spawn(async move {
         loop {
-            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
             let script = script.clone();
             let calls = calls_for_task.clone();
             tokio::spawn(async move {
@@ -43,7 +45,10 @@ async fn stub_llm(script: Vec<Scripted>) -> (String, Arc<AtomicUsize>) {
                 let _ = sock.read(&mut buf).await;
 
                 let n = calls.fetch_add(1, Ordering::SeqCst);
-                let step = script.get(n).cloned().unwrap_or(Scripted::Text(vec!["done."]));
+                let step = script
+                    .get(n)
+                    .cloned()
+                    .unwrap_or(Scripted::Text(vec!["done."]));
 
                 let mut body = String::new();
                 match step {
@@ -155,7 +160,12 @@ async fn harness(script: Vec<Scripted>) -> Harness {
     };
 
     Harness {
-        orch: Orchestrator { llm, tools, store, layers },
+        orch: Orchestrator {
+            llm,
+            tools,
+            store,
+            layers,
+        },
         cfg: (*cfg).clone(),
         calls,
         _tmp: tmp,
@@ -173,7 +183,10 @@ fn collect(rx: &mut tokio::sync::mpsc::UnboundedReceiver<TurnEvent>) -> Vec<Turn
 #[tokio::test]
 async fn plain_answer_streams_tokens_and_makes_one_llm_call() {
     let h = harness(vec![Scripted::Text(vec![
-        "High tide ", "in Bergen ", "is at ", "twenty past two.",
+        "High tide ",
+        "in Bergen ",
+        "is at ",
+        "twenty past two.",
     ])])
     .await;
 
@@ -187,14 +200,20 @@ async fn plain_answer_streams_tokens_and_makes_one_llm_call() {
     drop(tx);
 
     assert_eq!(answer, "High tide in Bergen is at twenty past two.");
-    assert_eq!(h.calls.load(Ordering::SeqCst), 1, "no tools => exactly one call");
+    assert_eq!(
+        h.calls.load(Ordering::SeqCst),
+        1,
+        "no tools => exactly one call"
+    );
     assert_eq!(timings.tool_rounds, 0);
     assert!(timings.ttft_ms.is_some(), "TTFT must be recorded");
 
     let events = collect(&mut rx);
     assert!(events.iter().any(|e| matches!(e, TurnEvent::Token(_))));
     assert!(
-        events.iter().any(|e| matches!(e, TurnEvent::SpeechChunk(_))),
+        events
+            .iter()
+            .any(|e| matches!(e, TurnEvent::SpeechChunk(_))),
         "the answer must reach the speech path"
     );
     assert!(
@@ -215,13 +234,23 @@ async fn tool_round_plays_an_acknowledgment_then_answers() {
     let mut timings = TurnTimings::new(1);
     let answer = h
         .orch
-        .run_turn(&h.cfg, "when is high tide in bergen", &tx, &mut timings, None)
+        .run_turn(
+            &h.cfg,
+            "when is high tide in bergen",
+            &tx,
+            &mut timings,
+            None,
+        )
         .await
         .unwrap();
     drop(tx);
 
     assert_eq!(answer, "Twenty past two.");
-    assert_eq!(h.calls.load(Ordering::SeqCst), 2, "one tool round => two calls");
+    assert_eq!(
+        h.calls.load(Ordering::SeqCst),
+        2,
+        "one tool round => two calls"
+    );
     assert_eq!(timings.tool_rounds, 1);
 
     let events = collect(&mut rx);
@@ -250,12 +279,21 @@ async fn parallel_tool_calls_all_execute_in_one_round() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut timings = TurnTimings::new(1);
     h.orch
-        .run_turn(&h.cfg, "tide and weather in bergen", &tx, &mut timings, None)
+        .run_turn(
+            &h.cfg,
+            "tide and weather in bergen",
+            &tx,
+            &mut timings,
+            None,
+        )
         .await
         .unwrap();
     drop(tx);
 
-    assert_eq!(timings.tool_rounds, 1, "three calls are ONE round, not three");
+    assert_eq!(
+        timings.tool_rounds, 1,
+        "three calls are ONE round, not three"
+    );
     assert_eq!(timings.tool_ms.len(), 3, "every call must run");
     let events = collect(&mut rx);
     let round = events
@@ -356,7 +394,10 @@ async fn local_harness_overhead_stays_inside_the_fifteen_millisecond_gate() {
     for _ in 0..3 {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut t = TurnTimings::new(0);
-        let _ = h.orch.run_turn(&h.cfg, "what units do I use", &tx, &mut t, None).await;
+        let _ = h
+            .orch
+            .run_turn(&h.cfg, "what units do I use", &tx, &mut t, None)
+            .await;
     }
 
     let mut overheads = Vec::new();
@@ -385,7 +426,10 @@ async fn a_turn_records_nothing_to_memory_by_itself() {
     let h = harness(vec![Scripted::Text(vec!["hello."])]).await;
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut t = TurnTimings::new(0);
-    h.orch.run_turn(&h.cfg, "hi", &tx, &mut t, None).await.unwrap();
+    h.orch
+        .run_turn(&h.cfg, "hi", &tx, &mut t, None)
+        .await
+        .unwrap();
 
     assert_eq!(h.orch.store.fact_count(), 0);
     assert!(h.orch.store.recent_messages(10).is_empty());

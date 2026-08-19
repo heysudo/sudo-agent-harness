@@ -79,7 +79,10 @@ impl Layers {
     }
 
     pub fn identity(&self) -> String {
-        self.identity.read().unwrap_or_else(|p| p.into_inner()).clone()
+        self.identity
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     pub fn core(&self) -> String {
@@ -203,7 +206,11 @@ pub fn assemble(
         .map(|m| m.content.as_deref().map(approx_tokens).unwrap_or(0))
         .sum();
 
-    Assembled { messages, prefix_tokens, total_tokens }
+    Assembled {
+        messages,
+        prefix_tokens,
+        total_tokens,
+    }
 }
 
 /// Convenience: recall + assemble in one call, returning timing for the metrics line.
@@ -295,14 +302,29 @@ mod tests {
 
         assert_eq!(a.messages[2].role, Role::User);
         assert_eq!(a.messages[2].content.as_deref(), Some("earlier question"));
-        assert_eq!(a.messages.last().unwrap().content.as_deref(), Some("what model is my boiler"));
+        assert_eq!(
+            a.messages.last().unwrap().content.as_deref(),
+            Some("what model is my boiler")
+        );
     }
 
     #[test]
     fn stable_prefix_is_byte_identical_across_turns() {
         let (_d, l) = layers_with("You are Hermit.", "- user likes tea", 600);
-        let a = assemble(&l, &recall_of(&["fact one"], &[]), &[], "first question", 1200);
-        let b = assemble(&l, &recall_of(&["totally different fact"], &[]), &[], "second question", 1200);
+        let a = assemble(
+            &l,
+            &recall_of(&["fact one"], &[]),
+            &[],
+            "first question",
+            1200,
+        );
+        let b = assemble(
+            &l,
+            &recall_of(&["totally different fact"], &[]),
+            &[],
+            "second question",
+            1200,
+        );
         assert_eq!(
             a.messages[0].content, b.messages[0].content,
             "per-turn recall must not leak into the stable prefix"
@@ -330,13 +352,19 @@ mod tests {
 
     #[test]
     fn core_md_over_cap_is_truncated() {
-        let long = (0..400).map(|i| format!("- durable fact number {i}\n")).collect::<String>();
+        let long = (0..400)
+            .map(|i| format!("- durable fact number {i}\n"))
+            .collect::<String>();
         let (_d, l) = layers_with("You are Hermit.", &long, 600);
         assert!(
             approx_tokens(&l.core()) <= 600,
-            "core was {} tokens", approx_tokens(&l.core())
+            "core was {} tokens",
+            approx_tokens(&l.core())
         );
-        assert!(!l.core().is_empty(), "truncation must keep the highest-priority lines");
+        assert!(
+            !l.core().is_empty(),
+            "truncation must keep the highest-priority lines"
+        );
     }
 
     #[test]
@@ -344,11 +372,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("identity.md"), "id").unwrap();
         let l = Layers::load(dir.path(), dir.path(), 600);
-        let long = (0..400).map(|i| format!("- fact {i}\n")).collect::<String>();
+        let long = (0..400)
+            .map(|i| format!("- fact {i}\n"))
+            .collect::<String>();
         l.write_core(dir.path(), &long).unwrap();
         let on_disk = std::fs::read_to_string(dir.path().join("core.md")).unwrap();
         assert!(approx_tokens(&on_disk) <= 600);
-        assert!(!dir.path().join("core.md.tmp").exists(), "temp file must be renamed away");
+        assert!(
+            !dir.path().join("core.md.tmp").exists(),
+            "temp file must be renamed away"
+        );
     }
 
     #[test]

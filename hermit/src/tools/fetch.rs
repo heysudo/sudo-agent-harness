@@ -78,7 +78,10 @@ impl FetchClient {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            bail!("firecrawl returned {status}: {}", crate::tools::clip(&text, 300));
+            bail!(
+                "firecrawl returned {status}: {}",
+                crate::tools::clip(&text, 300)
+            );
         }
 
         let parsed: ScrapeResponse =
@@ -101,9 +104,7 @@ impl FetchClient {
             .and_then(|m| m.title)
             .and_then(|v| match v {
                 serde_json::Value::String(s) => Some(s),
-                serde_json::Value::Array(a) => {
-                    a.first().and_then(|x| x.as_str().map(String::from))
-                }
+                serde_json::Value::Array(a) => a.first().and_then(|x| x.as_str().map(String::from)),
                 _ => None,
             })
             .unwrap_or_default();
@@ -136,15 +137,13 @@ fn normalize_url(url: &str) -> Result<String> {
     // no "://" at all — `data:text/html,...`, `javascript:...`, `mailto:...`.
     // Matching on "://" alone would let those through to the bare-domain branch
     // below and produce `https://data:text/html,...`.
-    let scheme_end = lowered
-        .find(':')
-        .filter(|&i| {
-            i > 0
-                && lowered[..i].starts_with(|c: char| c.is_ascii_alphabetic())
-                && lowered[..i]
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-        });
+    let scheme_end = lowered.find(':').filter(|&i| {
+        i > 0
+            && lowered[..i].starts_with(|c: char| c.is_ascii_alphabetic())
+            && lowered[..i]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+    });
     if let Some(i) = scheme_end {
         // A bare "example.com:8080/path" is a host:port, not a scheme.
         let is_port = lowered[i + 1..].starts_with(|c: char| c.is_ascii_digit());
@@ -212,9 +211,15 @@ mod tests {
     fn accepts_http_and_bare_domains() {
         assert_eq!(normalize_url("https://x.com/a").unwrap(), "https://x.com/a");
         assert_eq!(normalize_url("http://x.com").unwrap(), "http://x.com");
-        assert_eq!(normalize_url("example.com/page").unwrap(), "https://example.com/page");
+        assert_eq!(
+            normalize_url("example.com/page").unwrap(),
+            "https://example.com/page"
+        );
         // host:port must not be mistaken for a scheme
-        assert_eq!(normalize_url("example.com:8080/p").unwrap(), "https://example.com:8080/p");
+        assert_eq!(
+            normalize_url("example.com:8080/p").unwrap(),
+            "https://example.com:8080/p"
+        );
     }
 
     #[test]
@@ -224,7 +229,9 @@ mod tests {
 
     #[test]
     fn truncation_respects_the_cap_and_announces_itself() {
-        let long = (0..5000).map(|i| format!("line number {i}\n")).collect::<String>();
+        let long = (0..5000)
+            .map(|i| format!("line number {i}\n"))
+            .collect::<String>();
         let out = truncate_tokens(&long, 4000);
         assert!(crate::memory::approx_tokens(&out) <= 4100, "cap must hold");
         assert!(out.contains("[truncated"));

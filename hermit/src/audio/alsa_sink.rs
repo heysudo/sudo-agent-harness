@@ -25,7 +25,10 @@ pub struct AlsaBackend {
 impl AlsaBackend {
     pub fn open(cfg: &crate::config::Audio) -> Result<Self> {
         let pcm = Self::open_pcm(&cfg.playback_pcm, cfg)?;
-        Ok(Self { pcm, device: cfg.playback_pcm.clone() })
+        Ok(Self {
+            pcm,
+            device: cfg.playback_pcm.clone(),
+        })
     }
 
     fn open_pcm(name: &str, cfg: &crate::config::Audio) -> Result<PCM> {
@@ -42,7 +45,8 @@ impl AlsaBackend {
             hwp.set_rate(cfg.sample_rate, ValueOr::Nearest)
                 .with_context(|| format!("setting rate {}", cfg.sample_rate))?;
             hwp.set_format(Format::s16()).context("setting S16_LE")?;
-            hwp.set_access(Access::RWInterleaved).context("setting access mode")?;
+            hwp.set_access(Access::RWInterleaved)
+                .context("setting access mode")?;
             hwp.set_buffer_time_near(cfg.buffer_ms * 1000, ValueOr::Nearest)
                 .context("setting buffer time")?;
             hwp.set_period_time_near(cfg.period_ms * 1000, ValueOr::Nearest)

@@ -20,7 +20,10 @@ pub struct Headline {
 /// Fetch and parse every configured feed concurrently.
 pub async fn gather(http: &reqwest::Client, cfg: &News) -> Vec<Headline> {
     let timeout = Duration::from_millis(cfg.timeout_ms);
-    let futures = cfg.feeds.iter().map(|f| fetch_feed(http, f, cfg.items_per_feed, timeout));
+    let futures = cfg
+        .feeds
+        .iter()
+        .map(|f| fetch_feed(http, f, cfg.items_per_feed, timeout));
     let per_feed = futures_util::future::join_all(futures).await;
 
     let mut out = Vec::new();
@@ -86,7 +89,8 @@ pub async fn summarize(
     let system = if style_prompt.trim().is_empty() {
         default_style(target)
     } else {
-        style_prompt.replace("{min_words}", &target.0.to_string())
+        style_prompt
+            .replace("{min_words}", &target.0.to_string())
             .replace("{max_words}", &target.1.to_string())
     };
 

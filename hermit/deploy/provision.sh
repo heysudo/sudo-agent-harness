@@ -241,8 +241,11 @@ create_dirs() {
     install -d -o root -g "$HERMIT_GROUP" -m 0755 "${OPT_DIR}/bin"
     install -d -o root -g "$HERMIT_GROUP" -m 0755 "${OPT_DIR}/config"
 
-    # Mutable state: owned by hermit.
+    # Mutable state: owned by hermit. skills-pending/ is the quarantine for
+    # model-drafted skills — review a draft, then move it into
+    # ${OPT_DIR}/config/skills/ (root-owned) to activate it.
     install -d -o "$HERMIT_USER" -g "$HERMIT_GROUP" -m 0750 "$STATE_DIR"
+    install -d -o "$HERMIT_USER" -g "$HERMIT_GROUP" -m 0750 "${STATE_DIR}/skills-pending"
 
     # Secrets directory: not world-readable.
     install -d -o root -g "$HERMIT_GROUP" -m 0750 "$ETC_DIR"
