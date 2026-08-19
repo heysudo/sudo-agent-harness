@@ -58,8 +58,18 @@ Then, per `deploy/README.md`: flash firmware → `provision.sh` → deploy → f
 `/etc/hermit/hermit.env` → start the service. `scripts/phase0.sh` runs on the Pi and
 collects every Phase 0 fact into one report.
 
+### Operator console
+
+`sudo-console` is installed on the Pi by `provision.sh`. It is a dependency-free
+curses TUI showing the live microphone waveform/RMS level, wake-word score and
+threshold, wake activations, interim/final user transcripts, and assistant replies.
+Keys: `m` mic mute, `s` speaker mute, `r` restart HERMIT, `b` reboot, `p` power off,
+and `q` quit. Lifecycle actions require a second `y` confirmation and pass through a
+fixed root-owned helper with a narrowly scoped sudoers rule; the TUI never receives
+general root access.
+
 ```bash
-cargo test            # 192 tests, no network or API keys needed
+cargo test            # 214 tests, no network or API keys needed
 cargo run -- check --config config/hermit.toml   # validate config
 ```
 
@@ -174,7 +184,7 @@ is the *normal* mode id here).
 
 ## Verification status
 
-**Verified here** — 212 tests pass on the dev machine with no network and no API keys:
+**Verified here** — 214 tests pass on the dev machine with no network and no API keys:
 the chunker, router, memory and firewall, tool schemas and dispatch, SSE decoding and
 streaming tool-call reassembly, the 2-round cap, mpv IPC (against a fake mpv speaking
 the real dialect), audio mixing and barge-in generation logic, and the Cartesia/

@@ -54,7 +54,7 @@ User=hermit
 Group=hermit
 # Membership of `audio` is what grants access to /dev/snd. Without it every
 # snd_pcm_open() returns EACCES and the daemon cannot hear or speak.
-SupplementaryGroups=audio
+SupplementaryGroups=audio hermit-console
 
 # Secrets. Read by systemd as root before dropping privileges, so the file can
 # be (and is) 0600 hermit:hermit. Never put these in the config file or the repo.
@@ -65,6 +65,9 @@ Environment=RUST_LOG=info
 Environment=RUST_BACKTRACE=1
 
 WorkingDirectory=/opt/hermit
+ExecStartPre=+/usr/bin/install -d -o root -g hermit-console -m 0750 /run/hermit-console
+ExecStartPre=+/usr/bin/install -d -o hermit -g hermit-console -m 2750 /run/hermit-console/telemetry
+ExecStartPre=+/usr/bin/install -d -o root -g hermit-console -m 2770 /run/hermit-console/control
 ExecStart=/opt/hermit/bin/hermit run --config /opt/hermit/config/hermit.toml
 
 # SIGTERM lets the daemon flush SQLite, finish the in-flight TTS sentence and
@@ -75,14 +78,16 @@ TimeoutStopSec=15
 # ---------------------------------------------------------------------------
 # Directories.
 #
-#   RuntimeDirectory  -> /run/hermit  (0770 hermit:hermit) — mpv IPC socket.
+#   RuntimeDirectory  -> /run/hermit (0750 hermit:hermit), private mpv IPC.
+#   /run/hermit-console is created by ExecStartPre: telemetry is read-only to
+#     operators and only its control/ child is group-writable.
 #     Preserve=yes because hermit-mpv.service declares the same directory;
 #     without it, stopping either unit would delete the socket the other is
 #     using.
 #   StateDirectory    -> /var/lib/hermit — SQLite database and runtime state.
 # ---------------------------------------------------------------------------
 RuntimeDirectory=hermit
-RuntimeDirectoryMode=0770
+RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 StateDirectory=hermit
 StateDirectoryMode=0750
@@ -147,7 +152,7 @@ ProtectHome=yes
 # /opt/hermit (read-only is correct — it must not be able to rewrite its own
 # prompts or replace its own binary) and writes only to these two paths.
 ProtectSystem=strict
-ReadWritePaths=/var/lib/hermit /run/hermit
+ReadWritePaths=/var/lib/hermit /run/hermit /run/hermit-console
 
 ProtectControlGroups=yes
 ProtectKernelTunables=yes

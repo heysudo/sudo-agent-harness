@@ -29,10 +29,14 @@ set -euo pipefail
 
 readonly HERMIT_USER="hermit"
 readonly HERMIT_GROUP="hermit"
+readonly CONSOLE_GROUP="hermit-console"
 readonly OPT_DIR="/opt/hermit"
 readonly STATE_DIR="/var/lib/hermit"
 readonly ETC_DIR="/etc/hermit"
 readonly RUN_DIR="/run/hermit"
+readonly CONSOLE_RUN_DIR="/run/hermit-console"
+readonly TELEMETRY_DIR="${CONSOLE_RUN_DIR}/telemetry"
+readonly CONTROL_DIR="${CONSOLE_RUN_DIR}/control"
 readonly ENV_FILE="${ETC_DIR}/hermit.env"
 
 # Directory this script lives in, so we can find asound.conf and the units
@@ -83,6 +87,19 @@ write_if_changed() {
     install -D -m "$mode" /dev/null "$path"
     printf '%s\n' "$content" > "$path"
     chmod "$mode" "$path"
+    return 0
+}
+
+# Install an ordinary file only when bytes differ. Ownership/mode are converged on
+# every run without churning inode/mtime.
+install_file_if_changed() {
+    local src="$1" dst="$2" mode="$3" owner="${4:-root}" group="${5:-root}"
+    if [[ -f "$dst" ]] && cmp -s -- "$src" "$dst"; then
+        chown "$owner:$group" "$dst"
+        chmod "$mode" "$dst"
+        return 1
+    fi
+    install -D -o "$owner" -g "$group" -m "$mode" "$src" "$dst"
     return 0
 }
 
@@ -170,6 +187,13 @@ create_user() {
         changed "created system group ${HERMIT_GROUP}"
     fi
 
+    if getent group "$CONSOLE_GROUP" >/dev/null; then
+        log "group ${CONSOLE_GROUP} already exists"
+    else
+        groupadd --system "$CONSOLE_GROUP"
+        changed "created system group ${CONSOLE_GROUP}"
+    fi
+
     if id -u "$HERMIT_USER" >/dev/null 2>&1; then
         log "user ${HERMIT_USER} already exists"
     else
@@ -189,6 +213,10 @@ create_user() {
     else
         usermod -aG audio "$HERMIT_USER"
         changed "added ${HERMIT_USER} to group audio"
+    fi
+    if ! id -nG "$HERMIT_USER" | tr ' ' '\n' | grep -qx "$CONSOLE_GROUP"; then
+        usermod -aG "$CONSOLE_GROUP" "$HERMIT_USER"
+        changed "added ${HERMIT_USER} to group ${CONSOLE_GROUP}"
     fi
 }
 
@@ -219,21 +247,25 @@ create_dirs() {
     # Secrets directory: not world-readable.
     install -d -o root -g "$HERMIT_GROUP" -m 0750 "$ETC_DIR"
 
-    # Runtime dir.  systemd's RuntimeDirectory= recreates this on every start;
-    # we create it now so a manual foreground run before the first `systemctl
-    # start` also works.
-    install -d -o "$HERMIT_USER" -g "$HERMIT_GROUP" -m 0770 "$RUN_DIR"
+    # Runtime dirs. mpv IPC stays private; console telemetry and its narrow
+    # write-only control lease live in a separate tree.
+    install -d -o "$HERMIT_USER" -g "$HERMIT_GROUP" -m 0750 "$RUN_DIR"
+    install -d -o root -g "$CONSOLE_GROUP" -m 0750 "$CONSOLE_RUN_DIR"
+    install -d -o "$HERMIT_USER" -g "$CONSOLE_GROUP" -m 2750 "$TELEMETRY_DIR"
+    install -d -o root -g "$CONSOLE_GROUP" -m 2770 "$CONTROL_DIR"
 
-    # tmpfiles.d makes /run/hermit reappear after a reboot even if the daemon
-    # is not enabled yet (e.g. mpv sidecar starting first).
+    # tmpfiles.d recreates both tmpfs trees on boot.
     write_if_changed /etc/tmpfiles.d/hermit.conf \
-"# HERMIT runtime directory (sockets: mpv ipc).  /run is a tmpfs, so this must
-# be recreated on every boot.
-d ${RUN_DIR} 0770 ${HERMIT_USER} ${HERMIT_GROUP} -" 0644 \
+"# HERMIT private runtime (mpv IPC).
+d ${RUN_DIR} 0750 ${HERMIT_USER} ${HERMIT_GROUP} -
+# Read-only telemetry plus a narrow group-writable control lease.
+d ${CONSOLE_RUN_DIR} 0750 root ${CONSOLE_GROUP} -
+d ${TELEMETRY_DIR} 2750 ${HERMIT_USER} ${CONSOLE_GROUP} -
+d ${CONTROL_DIR} 2770 root ${CONSOLE_GROUP} -" 0644 \
         && changed "wrote /etc/tmpfiles.d/hermit.conf" || true
     systemd-tmpfiles --create /etc/tmpfiles.d/hermit.conf >/dev/null 2>&1 || true
 
-    log "layout: ${OPT_DIR}/{bin,config}  ${STATE_DIR}  ${ETC_DIR}  ${RUN_DIR}"
+    log "layout: ${OPT_DIR}/{bin,config}  ${STATE_DIR}  ${ETC_DIR}  ${RUN_DIR}  ${CONSOLE_RUN_DIR}"
 }
 
 
@@ -941,7 +973,7 @@ SupplementaryGroups=audio
 # Shared with hermit.service.  Preserve= stops one unit stopping from deleting
 # the directory (and the socket) out from under the other.
 RuntimeDirectory=hermit
-RuntimeDirectoryMode=0770
+RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
 
 # ProtectHome + ProtectSystem=strict below leave mpv with nowhere writable
@@ -1076,7 +1108,59 @@ WantedBy=multi-user.target" 0644
 
 
 # ===========================================================================
-# 13. Install the HERMIT systemd units from the repo.
+# 13. Operator console: install the TUI and narrowly scoped lifecycle helper.
+# ===========================================================================
+
+configure_console() {
+    step "sudo-console operator TUI"
+
+    local console_src="${DEPLOY_DIR}/../tools/sudo-console.py"
+    local helper_src="${DEPLOY_DIR}/hermit-console-power"
+    [[ -f "$console_src" ]] || die "sudo-console source missing: ${console_src}"
+    [[ -f "$helper_src" ]] || die "console power helper missing: ${helper_src}"
+
+    install_file_if_changed "$console_src" /usr/local/bin/sudo-console 0755 \
+        && changed "installed sudo-console" || log "sudo-console already up to date"
+    install_file_if_changed "$helper_src" /usr/local/sbin/hermit-console-power 0755 \
+        && changed "installed console lifecycle helper" || log "console lifecycle helper already up to date"
+
+    # The invoking administrator gets read-only telemetry access plus write access
+    # only to /run/hermit/control, and the three fixed lifecycle actions.
+    local operator="${SUDO_USER:-}"
+    if [[ -n "$operator" && "$operator" != root ]] && id "$operator" >/dev/null 2>&1; then
+        if ! id -nG "$operator" | tr ' ' '\n' | grep -qx "$CONSOLE_GROUP"; then
+            usermod -a -G "$CONSOLE_GROUP" "$operator"
+            changed "added ${operator} to ${CONSOLE_GROUP}"
+        fi
+        # Older provision.sh versions granted write access to all runtime files.
+        if id -nG "$operator" | tr ' ' '\n' | grep -qx "$HERMIT_GROUP"; then
+            gpasswd -d "$operator" "$HERMIT_GROUP" >/dev/null
+            changed "removed broad ${HERMIT_GROUP} runtime access from ${operator}"
+        fi
+    else
+        warn "SUDO_USER unavailable; add the operator to group '${CONSOLE_GROUP}'"
+    fi
+
+    write_if_changed /etc/sudoers.d/hermit-console \
+"%hermit-console ALL=(root) NOPASSWD: /usr/local/sbin/hermit-console-power service-restart, /usr/local/sbin/hermit-console-power reboot, /usr/local/sbin/hermit-console-power poweroff" 0440 \
+        && changed "installed restricted sudo-console lifecycle policy" || true
+    visudo -cf /etc/sudoers.d/hermit-console >/dev/null \
+        || die "invalid /etc/sudoers.d/hermit-console"
+
+    chown "$HERMIT_USER:$HERMIT_GROUP" "$RUN_DIR"
+    chmod 0750 "$RUN_DIR"
+    chown "root:$CONSOLE_GROUP" "$CONSOLE_RUN_DIR"
+    chmod 0750 "$CONSOLE_RUN_DIR"
+    chown "$HERMIT_USER:$CONSOLE_GROUP" "$TELEMETRY_DIR"
+    chmod 2750 "$TELEMETRY_DIR"
+    chown "root:$CONSOLE_GROUP" "$CONTROL_DIR"
+    chmod 2770 "$CONTROL_DIR"
+    log "sudo-console installed at /usr/local/bin/sudo-console"
+}
+
+
+# ===========================================================================
+# 14. Install the HERMIT systemd units from the repo.
 # ===========================================================================
 
 install_units() {
@@ -1172,6 +1256,7 @@ print_summary() {
     fi
 
     printf '  \033[1mUseful:\033[0m\n'
+    printf '    sudo-console                      live TUI: meters, transcript, controls\n'
     printf '    journalctl -u hermit -f          follow the daemon\n'
     printf '    systemctl status hermit          state, watchdog, memory\n'
     printf '    aplay -l ; arecord -l            confirm the Flex is the only card\n'
@@ -1203,6 +1288,7 @@ main() {
     configure_alsa
     create_env_template
     install_sidecars
+    configure_console
     install_units
     print_summary
 }

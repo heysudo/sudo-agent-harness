@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ $# -eq 1 ]] || { echo "usage: hermit-console-power {service-restart|reboot|poweroff}" >&2; exit 2; }
+case "$1" in
+    service-restart)
+        logger -t hermit-console "operator requested hermit.service restart"
+        exec systemctl restart hermit.service
+        ;;
+    reboot)
+        logger -t hermit-console "operator requested system reboot"
+        exec systemctl reboot
+        ;;
+    poweroff)
+        logger -t hermit-console "operator requested system poweroff"
+        exec systemctl poweroff
+        ;;
+    *)
+        echo "action not allowed: $1" >&2
+        exit 2
+        ;;
+esac

@@ -46,12 +46,15 @@ short name and native sample rate. Edit the adjustment block at the top of
 
 ```bash
 # from your dev machine
-rsync -av --delete hermit/deploy/ hermit/scripts/ pi@hermit.local:/tmp/hermit-deploy/
+ssh pi@hermit.local 'mkdir -p /tmp/hermit-deploy/{deploy,scripts,tools}'
+rsync -av --delete hermit/deploy/  pi@hermit.local:/tmp/hermit-deploy/deploy/
+rsync -av --delete hermit/scripts/ pi@hermit.local:/tmp/hermit-deploy/scripts/
+rsync -av --delete hermit/tools/   pi@hermit.local:/tmp/hermit-deploy/tools/
 
 ssh pi@hermit.local
-sudo bash /tmp/hermit-deploy/provision.sh
+sudo bash /tmp/hermit-deploy/deploy/provision.sh
 sudo reboot          # the first run changes boot config; it will tell you
-sudo bash /tmp/hermit-deploy/provision.sh   # second run sets the ALSA mixer
+sudo bash /tmp/hermit-deploy/deploy/provision.sh   # second run sets the ALSA mixer
 ```
 
 The second run matters: on the first pass the card may not have enumerated in
@@ -184,8 +187,10 @@ Re-run `provision.sh`. It is idempotent: it diffs before writing, only reports
 what actually changed, and never touches an existing `hermit.env`.
 
 ```bash
-rsync -av hermit/deploy/ pi@hermit.local:/tmp/hermit-deploy/
-ssh pi@hermit.local 'sudo bash /tmp/hermit-deploy/provision.sh'
+ssh pi@hermit.local 'mkdir -p /tmp/hermit-deploy/{deploy,tools}'
+rsync -av hermit/deploy/ pi@hermit.local:/tmp/hermit-deploy/deploy/
+rsync -av hermit/tools/  pi@hermit.local:/tmp/hermit-deploy/tools/
+ssh pi@hermit.local 'sudo bash /tmp/hermit-deploy/deploy/provision.sh'
 ```
 
 ---
