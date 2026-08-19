@@ -106,6 +106,29 @@ speaker, no PipeWire/PulseAudio (plain ALSA), no Docker on the Pi, no local
 models beyond the wake word, and no compiling on the Pi — its 1 GB is spoken
 for. These are locked positions, not defaults to tune.
 
+## Hermit and Hermes Agent
+
+Hermit is not a fork of [Hermes Agent](https://hermes-agent.nousresearch.com) — it
+is the same agent idea rebuilt for a device that must answer out loud in under a
+second. Hermes Agent is the general brain; Hermit is the ears and mouth.
+
+| | **Hermit** | **Hermes Agent** |
+| --- | --- | --- |
+| Form | one ~9 MB Rust binary, single process | Python framework, many subsystems |
+| Home | a passively cooled 1 GB Pi, always listening | desktop or server, invoked on demand |
+| Optimized for | **latency** — wake word to first audio under 1.2 s | **capability** — depth, breadth, correctness |
+| Interface | microphone and speaker: wake word, earcons, streamed TTS | chat, files, editors, GUI panes |
+| Tools | five, behind a regex fast path and a two-round cap | hundreds, plus MCP servers, subagents, cron |
+| A turn is | one question, one spoken answer, then silence | possibly an hour of autonomous multi-step work |
+| When unsure | degrades gracefully and stays quiet | stops and asks |
+
+What they share is the skeleton, deliberately: the same turn loop (route →
+tools → model → streamed answer), the same hosted models underneath, skills
+loaded from a config directory, a persistent memory store with a reflection
+pass, a gateway abstraction over front ends, and a persona defined in config
+rather than code. Hermit is what remains when that design is reduced to only
+what can run in milliseconds on a $50 board — and rewritten in Rust so it does.
+
 ## Operator console
 
 `sudo-console` ships with the device: a zero-dependency curses TUI with live
