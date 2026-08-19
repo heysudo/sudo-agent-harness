@@ -24,8 +24,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ALSA headers are needed only because the crate's host build touches
+      # alsa-sys. apt on the runners occasionally stalls for 10+ minutes on a
+      # mirror; bound it and retry once rather than burning the job's budget.
       - name: Install ALSA headers (host-feature build deps)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        timeout-minutes: 4
+        run: |
+          set -eux
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libasound2-dev \
+            || (sleep 5 && sudo apt-get install -y --no-install-recommends libasound2-dev)
 
       - name: Rust toolchain (pinned by hermit/rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@stable
