@@ -1,9 +1,27 @@
-# Named internet-radio stations. "play npr" and "play bbc world service" resolve
+# Named internet-radio stations. "play npr" and "play akashvani cuttack" resolve
 # here on the fast path, with no LLM call.
 #
-# Keys are matched case-insensitively.
+# Keys are matched case-insensitively. The router also matches "<key> ..." by
+# prefix, so short aliases ("akashvani") catch messy STT transcripts.
+#
+# AIR stream URLs come from the official player at akashvani.gov.in/radio/live.php
+# (Prasar Bharati); verified playable from this device on 2026-08-19.
 
 [stations]
+# --- All India Radio / Akashvani (Odisha) ---
+"akashvani cuttack" = "https://radio.wavespb.com/live/fbcc67ea837b6ea7/fbcc67ea837b6ea7.m3u8"
+"akashwani cuttack" = "https://radio.wavespb.com/live/fbcc67ea837b6ea7/fbcc67ea837b6ea7.m3u8"
+"akashvani" = "https://radio.wavespb.com/live/fbcc67ea837b6ea7/fbcc67ea837b6ea7.m3u8"
+"akashwani" = "https://radio.wavespb.com/live/fbcc67ea837b6ea7/fbcc67ea837b6ea7.m3u8"
+"air odia" = "https://radio.wavespb.com/live/fbcc67ea837b6ea7/fbcc67ea837b6ea7.m3u8"
+"radio cuttack" = "https://radio.wavespb.com/live/fbcc67ea837b6ea7/fbcc67ea837b6ea7.m3u8"
+"fm rainbow cuttack" = "https://radio.wavespb.com/live/e0ad71c249a45867/e0ad71c249a45867.m3u8"
+"vbs cuttack" = "https://radio.wavespb.com/live/cde7bdd265f54e70/cde7bdd265f54e70.m3u8"
+
+# --- All India Radio (national) ---
+"vividh bharati" = "https://air.pc.cdn.bitgravity.com/air/live/pbaudio001/playlist.m3u8"
+
+# --- International / music ---
 npr = "https://npr-ice.streamguys1.com/live.mp3"
 "bbc world service" = "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service"
 "jazz24" = "https://live.wostreaming.net/direct/ppm-jazz24aac256-ibc1"
