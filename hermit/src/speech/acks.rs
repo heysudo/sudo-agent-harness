@@ -13,31 +13,66 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+pub const LANGS: &[&str] = &["en-IN", "hi-IN", "od-IN"];
+
+/// Phrase bank per TTS language code. English is the default and the fallback;
+/// Hindi and Odia play when the user's LAST utterance was detected as such.
+pub fn phrases_for(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "od-IN" => &[
+            "ଠିକ୍ ଅଛି।",
+            "ଦେଖୁଛି।",
+            "ଏକ ମୁହୂର୍ତ୍ତ — ଖୋଜୁଛି।",
+            "ମୁଁ ଦେଖୁଛି।",
+            "ଅପେକ୍ଷା କରନ୍ତୁ।",
+            "ଦେଖିବାକୁ ଚାହୁଁଛି।",
+        ],
+        "hi-IN" => &[
+            "ठीक है।",
+            "देख रहा हूँ।",
+            "एक पल — खोज रहा हूँ।",
+            "अभी देखता हूँ।",
+            "थोड़ा रुकिए।",
+            "पता करता हूँ।",
+        ],
+        _ => &[
+            "Okay.",
+            "Looking.",
+            "One moment — searching.",
+            "Let me check.",
+            "Just a second.",
+            "On it.",
+        ],
+    }
+}
+
+/// Kept for the phrase-length test and external references.
 pub const PHRASES: &[&str] = &[
-    "ଠିକ୍ ଅଛି।",
-    "ଦେଖୁଛି।",
-    "ଏକ ମୁହୂର୍ତ୍ତ — ଖୋଜୁଛି।",
-    "ମୁଁ ଦେଖୁଛି।",
-    "ଅପେକ୍ଷା କରନ୍ତୁ।",
-    "ଦେଖିବାକୁ ଚାହୁଁଛି।",
+    "Okay.",
+    "Looking.",
+    "One moment — searching.",
+    "Let me check.",
+    "Just a second.",
+    "On it.",
 ];
 
 pub struct AckBank {
-    clips: Vec<Arc<Vec<i16>>>,
+    /// Clip banks keyed by TTS language code, in LANGS order.
+    banks: Vec<(&'static str, Vec<Arc<Vec<i16>>>)>,
     cursor: AtomicUsize,
 }
 
 impl AckBank {
     pub fn empty() -> Self {
-        Self { clips: Vec::new(), cursor: AtomicUsize::new(0) }
+        Self { banks: Vec::new(), cursor: AtomicUsize::new(0) }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.clips.is_empty()
+        self.banks.iter().all(|(_, c)| c.is_empty())
     }
 
     pub fn len(&self) -> usize {
-        self.clips.len()
+        self.banks.iter().map(|(_, c)| c.len()).sum()
     }
 
     /// Load cached clips from `dir`, synthesizing any that are missing.
@@ -54,64 +89,82 @@ impl AckBank {
             return Self::empty();
         }
 
-        let mut clips = Vec::new();
-        for (i, phrase) in PHRASES.iter().enumerate() {
-            let path = clip_path(dir, i);
-            match load_clip(&path) {
-                Ok(pcm) if !pcm.is_empty() => {
-                    clips.push(Arc::new(pcm));
+        let mut banks: Vec<(&'static str, Vec<Arc<Vec<i16>>>)> = Vec::new();
+        for lang in LANGS {
+            let mut clips = Vec::new();
+            for (i, phrase) in phrases_for(lang).iter().enumerate() {
+                let path = clip_path_lang(dir, lang, i);
+                match load_clip(&path) {
+                    Ok(pcm) if !pcm.is_empty() => {
+                        clips.push(Arc::new(pcm));
+                        continue;
+                    }
+                    _ => {}
+                }
+                if !tts.is_enabled() {
                     continue;
                 }
-                _ => {}
-            }
-            if !tts.is_enabled() {
-                continue;
-            }
-            // Bound each synthesis. A provider that accepts the connection and then
-            // stalls must not hold the whole device in `activating` — an ack is a
-            // nicety, booting is not. (Sarvam will sit on an idle socket for ~60s
-            // before erroring, which is 6 minutes across the bank.)
-            let built = tokio::time::timeout(
-                std::time::Duration::from_secs(8),
-                synthesize(tts, player, phrase),
-            )
-            .await;
-            match built {
-                Ok(Ok(pcm)) if !pcm.is_empty() => {
-                    if let Err(e) = save_clip(&path, &pcm) {
-                        tracing::warn!(error = %e, "could not cache ack clip");
+                // Bound each synthesis. A provider that accepts the connection and
+                // then stalls must not hold the whole device in `activating` — an
+                // ack is a nicety, booting is not. (Sarvam will sit on an idle
+                // socket for ~60s before erroring.)
+                let built = tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    synthesize(tts, player, phrase, Some(lang)),
+                )
+                .await;
+                match built {
+                    Ok(Ok(pcm)) if !pcm.is_empty() => {
+                        if let Err(e) = save_clip(&path, &pcm) {
+                            tracing::warn!(error = %e, "could not cache ack clip");
+                        }
+                        clips.push(Arc::new(pcm));
                     }
-                    clips.push(Arc::new(pcm));
+                    Ok(Ok(_)) => tracing::warn!(phrase, lang, "ack synthesis produced no audio"),
+                    Ok(Err(e)) => tracing::warn!(phrase, lang, error = %e, "ack synthesis failed"),
+                    Err(_) => tracing::warn!(phrase, lang, "ack synthesis timed out; skipping"),
                 }
-                Ok(Ok(_)) => tracing::warn!(phrase, "ack synthesis produced no audio"),
-                Ok(Err(e)) => tracing::warn!(phrase, error = %e, "ack synthesis failed"),
-                Err(_) => tracing::warn!(phrase, "ack synthesis timed out; skipping"),
             }
+            banks.push((*lang, clips));
         }
 
-        tracing::info!(count = clips.len(), dir = %dir.display(), "acknowledgment clips ready");
-        Self { clips, cursor: AtomicUsize::new(0) }
+        let total: usize = banks.iter().map(|(_, c)| c.len()).sum();
+        tracing::info!(count = total, dir = %dir.display(), "acknowledgment clips ready");
+        Self { banks, cursor: AtomicUsize::new(0) }
     }
 
-    /// Build directly from PCM, for tests.
+    /// Build directly from PCM as the default-language bank, for tests.
     pub fn from_clips(clips: Vec<Vec<i16>>) -> Self {
         Self {
-            clips: clips.into_iter().map(Arc::new).collect(),
+            banks: vec![("en-IN", clips.into_iter().map(Arc::new).collect())],
             cursor: AtomicUsize::new(0),
         }
     }
 
-    /// Play the next acknowledgment. Round-robins so the device does not sound
-    /// like a recording.
+    /// Play the next acknowledgment in `lang` (TTS code set), falling back to
+    /// the first non-empty bank when that language has no clips. Round-robins
+    /// so the device does not sound like a recording.
+    pub fn play_in(&self, player: &AudioPlayer, lang: Option<&str>) -> bool {
+        let clips = lang
+            .and_then(|l| self.banks.iter().find(|(k, c)| *k == l && !c.is_empty()))
+            .or_else(|| self.banks.iter().find(|(_, c)| !c.is_empty()))
+            .map(|(_, c)| c);
+        let Some(clips) = clips else { return false };
+        let i = self.cursor.fetch_add(1, Ordering::Relaxed) % clips.len();
+        player.try_play(clips[i].as_ref().clone())
+    }
+
+    /// Play in the default language (first bank).
     pub fn play(&self, player: &AudioPlayer) -> bool {
-        if self.clips.is_empty() {
-            return false;
-        }
-        let i = self.cursor.fetch_add(1, Ordering::Relaxed) % self.clips.len();
-        player.try_play(self.clips[i].as_ref().clone())
+        self.play_in(player, None)
     }
 }
 
+fn clip_path_lang(dir: &Path, lang: &str, index: usize) -> PathBuf {
+    dir.join(format!("ack-{lang}-{index}.pcm"))
+}
+
+/// Legacy single-language path, still used by the disk round-trip test.
 fn clip_path(dir: &Path, index: usize) -> PathBuf {
     dir.join(format!("ack{index}.pcm"))
 }
@@ -138,6 +191,7 @@ async fn synthesize(
     tts: &super::tts::Tts,
     _live_player: &AudioPlayer,
     phrase: &str,
+    lang: Option<&str>,
 ) -> Result<Vec<i16>> {
     let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
     let backend = CaptureBackend { out: captured.clone() };
@@ -147,7 +201,7 @@ async fn synthesize(
     tx.send(phrase.to_string()).await.ok();
     drop(tx);
 
-    tts.speak(rx, &capture_player, capture_player.generation(), None).await?;
+    tts.speak(rx, &capture_player, capture_player.generation(), lang).await?;
 
     // Let the playback thread finish consuming before reading the buffer.
     for _ in 0..100 {
@@ -186,11 +240,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn six_phrases_are_defined_and_short() {
-        assert_eq!(PHRASES.len(), 6);
-        for p in PHRASES {
-            assert!(p.split_whitespace().count() <= 6, "{p:?} is too long to be instant");
+    fn six_phrases_are_defined_and_short_in_every_language() {
+        for lang in LANGS {
+            let phrases = phrases_for(lang);
+            assert_eq!(phrases.len(), 6, "{lang}");
+            for p in phrases {
+                assert!(p.split_whitespace().count() <= 6, "{p:?} is too long to be instant");
+            }
         }
+        // Unknown language falls back to English.
+        assert_eq!(phrases_for("fr-FR"), phrases_for("en-IN"));
+    }
+
+    #[test]
+    fn play_in_prefers_language_and_falls_back() {
+        let bank = AckBank {
+            banks: vec![
+                ("en-IN", vec![Arc::new(vec![1i16])]),
+                ("od-IN", vec![Arc::new(vec![2i16])]),
+                ("hi-IN", vec![]),
+            ],
+            cursor: AtomicUsize::new(0),
+        };
+        let p = AudioPlayer::spawn_with(
+            Box::new(crate::audio::NullBackend::new(16_000)),
+            16_000,
+        )
+        .unwrap();
+        assert!(bank.play_in(&p, Some("od-IN")), "exact language bank");
+        assert!(bank.play_in(&p, Some("hi-IN")), "empty bank falls back");
+        assert!(bank.play_in(&p, Some("fr-FR")), "unknown falls back");
+        assert!(bank.play_in(&p, None), "no language = default bank");
     }
 
     #[test]

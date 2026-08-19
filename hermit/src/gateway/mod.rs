@@ -190,6 +190,8 @@ impl Gateway {
         let acks = self.acks.clone();
         let player = self.player.clone();
         let text_sink = text.clone();
+        // Acks speak the user's detected language too (English when unknown).
+        let ack_lang = reply_lang.clone();
         let turn_started = timings.started.unwrap_or_else(Instant::now);
         let pump = tokio::spawn(async move {
             let mut ack_at: Option<f64> = None;
@@ -207,7 +209,7 @@ impl Gateway {
                         }
                     }
                     TurnEvent::Ack => {
-                        if acks.play(&player) && ack_at.is_none() {
+                        if acks.play_in(&player, ack_lang.as_deref()) && ack_at.is_none() {
                             ack_at = Some(crate::metrics::ms_since(turn_started));
                         }
                     }

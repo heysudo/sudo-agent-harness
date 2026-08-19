@@ -85,7 +85,10 @@ connect_timeout_ms = 3000
 sarvam_tts_url = "wss://api.sarvam.ai/text-to-speech/ws"
 # Bulbul v3 wants "od-IN" for Odia; the STT service wants "or-IN" for the SAME
 # language. Sarvam is inconsistent between its own services. Both verified live.
-sarvam_tts_language = "od-IN"
+# DEFAULT voice language: used when per-turn detection has nothing (boot
+# announcements, undetected turns). Per-turn replies and acks follow the
+# language of the user's LAST utterance (auto-detected by STT).
+sarvam_tts_language = "en-IN"
 sarvam_tts_voice = "shubh"         # every spoken word from the device, incl. acks
 
 [stt]
