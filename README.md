@@ -166,6 +166,8 @@ what can run in milliseconds on a $50 board — and rewritten in Rust so it does
 
 ## Operator console
 
+![sudo-console: live meters, conversation, and activity log during a real voice session](docs/sudo-console.png)
+
 `sudo-console` ships with the device: a zero-dependency curses TUI with live
 RMS and wake-score meters, interim transcripts, the running conversation, and
 guarded lifecycle controls (`m` mic, `s` speaker, `-`/`+` volume, `r`/`b`/`p`
