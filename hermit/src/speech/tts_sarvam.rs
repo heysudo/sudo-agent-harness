@@ -106,11 +106,11 @@ impl SarvamTts {
         Ok(ws)
     }
 
-    fn config_frame(&self) -> String {
+    fn config_frame(&self, language_code: &str) -> String {
         serde_json::json!({
             "type": "config",
             "data": {
-                "language_code": self.language_code,
+                "language_code": language_code,
                 "speaker": self.speaker,
                 "output_audio_codec": "linear16",
                 "speech_sample_rate": self.sample_rate,
@@ -141,7 +141,12 @@ impl SarvamTts {
         text_rx: TextRx,
         player: &AudioPlayer,
         generation: u64,
+        lang_override: Option<&str>,
     ) -> Result<SpeakResult> {
+        // Per-turn language matching: reply in the language the user spoke
+        // (already mapped to TTS codes by the caller); fall back to the
+        // configured default voice language.
+        let lang = lang_override.unwrap_or(&self.language_code);
         let mut guard = self.conn.lock().await;
         // Reuse a warm socket only if it was used moments ago; Sarvam
         // idle-closes them and a dead socket downgrades the turn to silence.
@@ -152,7 +157,7 @@ impl SarvamTts {
 
         drop(guard);
         let result = self
-            .stream_utterance(&mut ws, text_rx, player, generation)
+            .stream_utterance(&mut ws, text_rx, player, generation, lang)
             .await;
 
         match result {
@@ -181,13 +186,14 @@ impl SarvamTts {
         mut text_rx: TextRx,
         player: &AudioPlayer,
         generation: u64,
+        language_code: &str,
     ) -> Result<SpeakResult> {
         let mut result = SpeakResult::default();
         let started = Instant::now();
         let mut text_done = false;
         let mut sent_any_text = false;
 
-        ws.send(Message::Text(self.config_frame().into()))
+        ws.send(Message::Text(self.config_frame(language_code).into()))
             .await
             .context("sending sarvam tts config")?;
 

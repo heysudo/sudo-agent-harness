@@ -147,7 +147,7 @@ async fn synthesize(
     tx.send(phrase.to_string()).await.ok();
     drop(tx);
 
-    tts.speak(rx, &capture_player, capture_player.generation()).await?;
+    tts.speak(rx, &capture_player, capture_player.generation(), None).await?;
 
     // Let the playback thread finish consuming before reading the buffer.
     for _ in 0..100 {

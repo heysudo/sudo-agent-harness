@@ -94,7 +94,7 @@ provider = "sarvam"
 
 # --- Sarvam Saaras v3 realtime ---
 sarvam_url = "wss://api.sarvam.ai/speech-to-text-realtime/ws"
-sarvam_language = "or-IN"       # Odia-first (STT code; TTS calls it "od-IN")
+sarvam_language = "auto"        # per-turn detection; TTS replies in the detected language
 sarvam_stream_type = "fast"     # lowest-latency partials for conversational voice
 sarvam_silence_ms = 500         # server VAD pause before finalizing
 sarvam_vad_threshold = 0.15     # default 0.3 misses the XVF3800's quiet output

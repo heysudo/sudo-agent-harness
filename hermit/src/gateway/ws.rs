@@ -57,6 +57,21 @@ async fn serve(gateway: Arc<Gateway>, stream: TcpStream) -> Result<()> {
             continue;
         }
 
+        // Remote voice-turn trigger: identical to typing /listen at the CLI. Lets
+        // an operator (or a test harness) exercise the REAL wake→listen→answer
+        // pipeline over the gateway without standing at the device.
+        if utterance == "/listen" {
+            let ok = gateway.trigger_listen();
+            let kind = if ok { "final" } else { "error" };
+            let msg = if ok {
+                "listening... speak now"
+            } else {
+                "voice pipeline is not running"
+            };
+            sink.send(Message::Text(event(kind, msg).into())).await?;
+            continue;
+        }
+
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let gw = gateway.clone();
         let turn = tokio::spawn(async move {

@@ -128,16 +128,20 @@ impl Tts {
     ///
     /// `generation` is the audio generation at the time the turn began. If a
     /// barge-in bumps it, this returns early with `interrupted = true`.
+    /// `lang` optionally overrides the voice language for this one utterance
+    /// (per-turn language matching); providers without multi-language voices
+    /// ignore it.
     pub async fn speak(
         &self,
         text_rx: TextRx,
         player: &AudioPlayer,
         generation: u64,
+        lang: Option<&str>,
     ) -> Result<SpeakResult> {
         match self {
             Tts::Cartesia(c) => c.speak(text_rx, player, generation).await,
             Tts::ElevenLabs(e) => e.speak(text_rx, player, generation).await,
-            Tts::Sarvam(s) => s.speak(text_rx, player, generation).await,
+            Tts::Sarvam(s) => s.speak(text_rx, player, generation, lang).await,
             Tts::Piper(p) => p.speak(text_rx, player, generation).await,
             Tts::Disabled => {
                 // Drain so the producer is not left blocked on a full channel.
@@ -766,7 +770,7 @@ mod tests {
             true
         });
 
-        let r = Tts::Disabled.speak(rx, &player, 0).await.unwrap();
+        let r = Tts::Disabled.speak(rx, &player, 0, None).await.unwrap();
         assert_eq!(r.samples, 0);
         assert!(producer.await.unwrap(), "producer must not be left blocked");
     }

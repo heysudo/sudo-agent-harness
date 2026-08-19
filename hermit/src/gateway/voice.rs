@@ -311,6 +311,10 @@ async fn transcribe_and_answer(
 
     while let Some(ev) = events.recv().await {
         match &ev {
+            SttEvent::Language(lang) => {
+                builder.apply(&ev);
+                tracing::info!(language = %lang, "stt detected language");
+            }
             SttEvent::Interim(_) | SttEvent::Final(_) => {
                 builder.apply(&ev);
                 let provisional = builder.provisional();
@@ -333,6 +337,20 @@ async fn transcribe_and_answer(
             }
             SttEvent::EndOfSpeech(_) => {
                 builder.apply(&ev);
+                // Sarvam sends vad.speech_end BEFORE transcript.final (~160ms gap,
+                // measured live). Wait briefly for the polished final — it has the
+                // corrected text and the confident language tag — instead of
+                // answering off the rougher interim.
+                let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
+                while let Ok(Some(late)) =
+                    tokio::time::timeout_at(deadline, events.recv()).await
+                {
+                    let is_final = matches!(late, SttEvent::Final(_));
+                    builder.apply(&late);
+                    if is_final {
+                        break;
+                    }
+                }
                 break;
             }
             SttEvent::Closed(reason) => {
@@ -393,11 +411,23 @@ async fn transcribe_and_answer(
 
     tracing::info!(
         utterance = %utterance,
+        language = builder.language().unwrap_or("unknown"),
         wake_to_transcript_ms = wake_at.elapsed().as_millis(),
         "answering"
     );
 
-    match gateway.handle(&utterance, true, None, prefetch).await {
+    // Reply in the language the user spoke this turn. STT and TTS use different
+    // code sets for the same language (Odia: or-IN vs od-IN), so map here; an
+    // unmapped or missing detection falls back to the configured default voice.
+    let reply_lang = builder
+        .language()
+        .and_then(crate::speech::stt::stt_to_tts_lang)
+        .map(String::from);
+
+    match gateway
+        .handle_in_language(&utterance, true, None, prefetch, reply_lang)
+        .await
+    {
         Ok(r) => {
             if r.speech_completed {
                 // Every response sample has already played. Queue and drain the final

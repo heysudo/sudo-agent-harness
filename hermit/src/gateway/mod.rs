@@ -107,6 +107,22 @@ impl Gateway {
         text: Option<TextSink>,
         prefetch: Option<Prefetch>,
     ) -> Result<TurnResult> {
+        self.handle_in_language(utterance, speak, text, prefetch, None)
+            .await
+    }
+
+    /// Like [`Self::handle`], with an optional per-turn TTS language override
+    /// (already in the TTS provider's code set — Odia is `od-IN` here). Voice
+    /// turns pass the language the STT detected so the reply is spoken in the
+    /// language the user used; `None` keeps the configured default voice.
+    pub async fn handle_in_language(
+        &self,
+        utterance: &str,
+        speak: bool,
+        text: Option<TextSink>,
+        prefetch: Option<Prefetch>,
+        reply_lang: Option<String>,
+    ) -> Result<TurnResult> {
         let _guard = self.turn_lock.lock().await;
         let cfg = self.config();
         let turn_id = self.turn_seq.fetch_add(1, Ordering::Relaxed);
@@ -133,7 +149,8 @@ impl Gateway {
             if let Some(tx) = &text {
                 let _ = tx.send(answer.clone());
             }
-            let speech_completed = speak && self.speak_once(&answer).await;
+            let speech_completed =
+                speak && self.speak_once_in(&answer, reply_lang.as_deref()).await;
             // Device commands are conversational too — record them so "turn it up"
             // followed by "actually, back down" has context.
             let _ = self.store.record_message("user", utterance);
@@ -160,8 +177,9 @@ impl Gateway {
             self.music.duck().await;
             let tts = self.tts.clone();
             let player = self.player.clone();
+            let lang = reply_lang.clone();
             Some(tokio::spawn(async move {
-                tts.speak(chunk_rx, &player, generation).await
+                tts.speak(chunk_rx, &player, generation, lang.as_deref()).await
             }))
         } else {
             drop(chunk_rx);
@@ -290,6 +308,11 @@ impl Gateway {
 
     /// Speak a single fixed string (device replies, research announcements).
     pub async fn speak_once(&self, text: &str) -> bool {
+        self.speak_once_in(text, None).await
+    }
+
+    /// Speak a single fixed string in a specific TTS language (or the default).
+    pub async fn speak_once_in(&self, text: &str, lang: Option<&str>) -> bool {
         if !self.tts.is_enabled() || text.trim().is_empty() {
             return false;
         }
@@ -298,7 +321,7 @@ impl Gateway {
         let _ = tx.send(text.to_string()).await;
         drop(tx);
         self.music.duck().await;
-        let completed = match self.tts.speak(rx, &self.player, generation).await {
+        let completed = match self.tts.speak(rx, &self.player, generation, lang).await {
             Ok(sr) => sr.completed(),
             Err(e) => {
                 tracing::warn!(error = %e, "speaking failed");

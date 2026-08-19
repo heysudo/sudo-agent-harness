@@ -24,6 +24,10 @@ pub enum SttEvent {
     Final(String),
     /// End of utterance — the user stopped talking.
     EndOfSpeech(String),
+    /// Detected spoken language (BCP-47, STT's own code set — Odia is `or-IN`).
+    /// Emitted by Sarvam when `language_code=auto`; later frames refine earlier
+    /// ones, so the last one seen wins.
+    Language(String),
     /// Upstream closed or errored.
     Closed(Option<String>),
 }
@@ -313,6 +317,13 @@ impl Sarvam {
             let deadline = tokio::time::sleep(max_utterance);
             tokio::pin!(deadline);
 
+            // Diagnostic taps: HERMIT_STT_DUMP=1 writes the exact PCM of the most
+            // recent session (raw mic + post-gain upload) for offline analysis.
+            let mut dump_pre = std::env::var_os("HERMIT_STT_DUMP")
+                .and_then(|_| std::fs::File::create("/tmp/hermit_stt_pre.pcm").ok());
+            let mut dump_post = std::env::var_os("HERMIT_STT_DUMP")
+                .and_then(|_| std::fs::File::create("/tmp/hermit_stt_post.pcm").ok());
+
             let mut audio_open = true;
             loop {
                 tokio::select! {
@@ -325,6 +336,13 @@ impl Sarvam {
                         };
                         match incoming {
                             Ok(Message::Text(t)) => {
+                                // Log every server frame: silent turns are undebuggable
+                                // when unknown/empty events vanish without a trace.
+                                let shown: String = t.chars().take(400).collect();
+                                tracing::info!(frame = %shown, "sarvam stt frame");
+                                if let Some(lang) = sarvam_frame_language(&t) {
+                                    let _ = event_tx.send(SttEvent::Language(lang)).await;
+                                }
                                 if let Some(ev) = parse_sarvam_event(&t) {
                                     let _ = event_tx.send(ev).await;
                                 }
@@ -345,6 +363,12 @@ impl Sarvam {
                     chunk = audio_rx.recv(), if audio_open => {
                         match chunk {
                             Some(samples) => {
+                                if let Some(f) = dump_pre.as_mut() {
+                                    use std::io::Write;
+                                    let mut raw = Vec::with_capacity(samples.len() * 2);
+                                    for s in &samples { raw.extend_from_slice(&s.to_le_bytes()); }
+                                    let _ = f.write_all(&raw);
+                                }
                                 // linear16 mono → gain → base64 JSON frame
                                 let mut bytes = Vec::with_capacity(samples.len() * 2);
                                 for s in samples {
@@ -352,6 +376,10 @@ impl Sarvam {
                                         .clamp(i16::MIN as f32, i16::MAX as f32)
                                         as i16;
                                     bytes.extend_from_slice(&boosted.to_le_bytes());
+                                }
+                                if let Some(f) = dump_post.as_mut() {
+                                    use std::io::Write;
+                                    let _ = f.write_all(&bytes);
                                 }
                                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                                 let frame = serde_json::json!({"event":"audio_input","audio":b64}).to_string();
@@ -481,6 +509,44 @@ pub fn parse_event(raw: &str) -> Option<SttEvent> {
     })
 }
 
+/// Pull the detected-language tag off a Sarvam frame, if present.
+///
+/// With `language_code=auto`, transcript frames carry `"language":"or-IN"`-style
+/// tags (observed live). Empty-text partials still carry a guess, so this is
+/// separate from [`parse_sarvam_event`], which drops empty transcripts.
+pub fn sarvam_frame_language(raw: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let lang = v.get("language")?.as_str()?.trim();
+    if lang.is_empty() {
+        None
+    } else {
+        Some(lang.to_string())
+    }
+}
+
+/// Map an STT-detected language code to the code Sarvam's TTS accepts.
+///
+/// The same vendor uses different codes across products: STT says Odia is
+/// `or-IN`, TTS only accepts `od-IN` (both verified live — each service
+/// rejects the other's code). Languages Bulbul v3 cannot speak return `None`
+/// so the caller falls back to the configured default voice language.
+pub fn stt_to_tts_lang(stt_code: &str) -> Option<&'static str> {
+    match stt_code {
+        "or-IN" | "od-IN" => Some("od-IN"),
+        "hi-IN" => Some("hi-IN"),
+        "en-IN" | "en-US" => Some("en-IN"),
+        "bn-IN" => Some("bn-IN"),
+        "ta-IN" => Some("ta-IN"),
+        "te-IN" => Some("te-IN"),
+        "kn-IN" => Some("kn-IN"),
+        "ml-IN" => Some("ml-IN"),
+        "mr-IN" => Some("mr-IN"),
+        "gu-IN" => Some("gu-IN"),
+        "pa-IN" => Some("pa-IN"),
+        _ => None,
+    }
+}
+
 /// Accumulates finalized segments into the complete utterance.
 ///
 /// Deepgram emits an utterance as a series of finalized segments; the last one is
@@ -490,6 +556,9 @@ pub fn parse_event(raw: &str) -> Option<SttEvent> {
 pub struct TranscriptBuilder {
     finalized: Vec<String>,
     interim: String,
+    /// Latest language tag seen this turn (STT code set). Later frames refine
+    /// earlier guesses, so last-writer-wins is the right policy.
+    language: Option<String>,
 }
 
 impl TranscriptBuilder {
@@ -497,11 +566,26 @@ impl TranscriptBuilder {
         match ev {
             SttEvent::Interim(t) => self.interim = t.clone(),
             SttEvent::Final(t) | SttEvent::EndOfSpeech(t) => {
-                self.finalized.push(t.clone());
-                self.interim.clear();
+                if t.trim().is_empty() {
+                    // Sarvam's vad.speech_end carries no text. Promote the interim
+                    // instead of clearing it — wiping it here silently destroyed
+                    // every fully-transcribed utterance ("no speech captured").
+                    if !self.interim.trim().is_empty() {
+                        self.finalized.push(std::mem::take(&mut self.interim));
+                    }
+                } else {
+                    self.finalized.push(t.clone());
+                    self.interim.clear();
+                }
             }
+            SttEvent::Language(l) => self.language = Some(l.clone()),
             SttEvent::Closed(_) => {}
         }
+    }
+
+    /// The language the user spoke this turn, if the STT reported one.
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
     }
 
     /// Best guess right now, including the unstable tail — for prefetch only.
@@ -636,6 +720,51 @@ mod tests {
         );
         // The STT side must never inherit the TTS spelling.
         assert!(stt_default.sarvam_language == "auto" || stt_default.sarvam_language == "or-IN");
+    }
+
+    #[test]
+    fn empty_end_of_speech_promotes_the_interim_instead_of_destroying_it() {
+        // THE silent-device bug: Sarvam's vad.speech_end carries no text. The
+        // builder used to push "" AND clear the interim — so a perfectly
+        // transcribed utterance became "no speech captured" and the device
+        // never answered. The empty finalizer must promote the interim.
+        let mut b = TranscriptBuilder::default();
+        b.apply(&SttEvent::Interim("What is the weather in Bhubanes".into()));
+        b.apply(&SttEvent::EndOfSpeech(String::new())); // vad.speech_end
+        assert_eq!(b.best_utterance(), "What is the weather in Bhubanes");
+
+        // And when the polished final does arrive late, it wins outright.
+        let mut b = TranscriptBuilder::default();
+        b.apply(&SttEvent::Interim("What is the weather in Bhubanes".into()));
+        b.apply(&SttEvent::EndOfSpeech(String::new()));
+        b.apply(&SttEvent::Final("What is the weather in Bhubaneswar?".into()));
+        assert!(b.best_utterance().contains("Bhubaneswar?"));
+    }
+
+    #[test]
+    fn language_tags_ride_along_and_map_to_tts_codes() {
+        // Live finding: with language_code=auto every transcript frame carries a
+        // "language" tag — including empty-text partials that parse_sarvam_event
+        // drops, so the tag is read independently of the transcript.
+        let frame = r#"{"event":"transcript.partial","utterance_idx":0,"text":"","language":"or-IN"}"#;
+        assert_eq!(sarvam_frame_language(frame).as_deref(), Some("or-IN"));
+        assert_eq!(
+            sarvam_frame_language(r#"{"event":"vad.speech_start","utterance_idx":0}"#),
+            None
+        );
+
+        // The builder keeps the latest tag: later frames refine earlier guesses.
+        let mut b = TranscriptBuilder::default();
+        b.apply(&SttEvent::Language("en-IN".into()));
+        b.apply(&SttEvent::Language("or-IN".into()));
+        assert_eq!(b.language(), Some("or-IN"));
+
+        // STT and TTS disagree on Odia's code (verified live: each rejects the
+        // other's). Unspeakable languages fall back to the default voice (None).
+        assert_eq!(stt_to_tts_lang("or-IN"), Some("od-IN"));
+        assert_eq!(stt_to_tts_lang("hi-IN"), Some("hi-IN"));
+        assert_eq!(stt_to_tts_lang("en-IN"), Some("en-IN"));
+        assert_eq!(stt_to_tts_lang("sat-IN"), None, "Bulbul cannot speak Santali");
     }
 
     fn results(transcript: &str, is_final: bool, speech_final: bool) -> String {
