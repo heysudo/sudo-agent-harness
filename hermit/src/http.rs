@@ -122,8 +122,10 @@ mod tests {
 
     #[test]
     fn secret_error_names_the_variable() {
-        unsafe { std::env::remove_var("HERMIT_TEST_ABSENT_KEY") };
-        let err = secret("HERMIT_TEST_ABSENT_KEY").unwrap_err().to_string();
-        assert!(err.contains("HERMIT_TEST_ABSENT_KEY"));
+        // A name no environment would define, so this needs no env mutation
+        // (mutating one is a data race under parallel test threads).
+        let name = "HERMIT_TEST_ABSENT_KEY_a41f2c7b";
+        let err = secret(name).unwrap_err().to_string();
+        assert!(err.contains(name));
     }
 }

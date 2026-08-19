@@ -496,7 +496,22 @@ impl Config {
     }
 
     /// Sanity checks that would otherwise surface as confusing runtime failures.
+    ///
+    /// Reads the environment (for `HERMIT_WS_TOKEN`); the pure rule lives in
+    /// [`Self::validate_with`] so tests never touch process-global state.
     pub fn validate(&self) -> Result<()> {
+        self.validate_with(crate::http::secret_opt("HERMIT_WS_TOKEN").is_some())
+    }
+
+    /// Pure form of [`Self::validate`]: `ws_token_present` is supplied rather
+    /// than read from the environment.
+    ///
+    /// This split exists for a real bug: the env-reading version can only be
+    /// tested by mutating a process-global, and `cargo test` runs tests in
+    /// parallel threads — concurrent `setenv`/`getenv` is a data race (which is
+    /// why it is `unsafe` in edition 2024). It passed locally and aborted on
+    /// CI, where the core count and scheduling differ.
+    pub fn validate_with(&self, ws_token_present: bool) -> Result<()> {
         anyhow::ensure!(
             self.llm.max_tool_rounds >= 1 && self.llm.max_tool_rounds <= 2,
             "llm.max_tool_rounds must be 1 or 2 — the interactive path is capped at 2 rounds by design (spec §4.3)"
@@ -527,7 +542,7 @@ impl Config {
         // Refuse to expose that without a bearer token.
         if !self.server.ws_bind.is_empty()
             && !ws_bind_is_loopback(&self.server.ws_bind)
-            && crate::http::secret_opt("HERMIT_WS_TOKEN").is_none()
+            && !ws_token_present
         {
             anyhow::bail!(
                 "server.ws_bind = \"{}\" is reachable beyond loopback but HERMIT_WS_TOKEN is not \
@@ -662,8 +677,8 @@ mod tests {
 
     #[test]
     fn non_loopback_ws_bind_requires_a_token() {
-        // SAFETY of the env access: tests in this module run in one process;
-        // the var is cleared again before the assertion that needs it unset.
+        // Pure: no process-global env mutation, so this is safe under the
+        // parallel test threads that made the previous version CI-flaky.
         let mut cfg = Config::default();
         for bind in [
             "0.0.0.0:8765",
@@ -672,15 +687,13 @@ mod tests {
             "myhost:8765",
         ] {
             cfg.server.ws_bind = bind.into();
-            unsafe { std::env::remove_var("HERMIT_WS_TOKEN") };
-            let err = cfg.validate().unwrap_err().to_string();
+            let err = cfg.validate_with(false).unwrap_err().to_string();
             assert!(err.contains("HERMIT_WS_TOKEN"), "bind {bind}: {err}");
+            assert!(cfg.validate_with(true).is_ok(), "a token unlocks {bind}");
         }
-        // With a token present the same bind is accepted.
-        unsafe { std::env::set_var("HERMIT_WS_TOKEN", "t0ken") };
-        cfg.server.ws_bind = "0.0.0.0:8765".into();
-        assert!(cfg.validate().is_ok());
-        unsafe { std::env::remove_var("HERMIT_WS_TOKEN") };
+        // Loopback never needs a token.
+        cfg.server.ws_bind = "127.0.0.1:8765".into();
+        assert!(cfg.validate_with(false).is_ok());
     }
 
     #[test]

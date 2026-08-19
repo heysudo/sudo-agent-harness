@@ -68,22 +68,32 @@ impl Tts {
     /// than failing to boot: a device that answers in text is better than one that
     /// will not start.
     pub fn from_config(cfg: &crate::config::Config) -> Self {
+        Self::from_config_with(cfg, crate::http::secret_opt)
+    }
+
+    /// Pure form of [`Self::from_config`]: `secret` supplies keys instead of
+    /// the process environment, so tests never mutate a process-global (a data
+    /// race under parallel test threads; `unsafe` in edition 2024).
+    pub fn from_config_with(
+        cfg: &crate::config::Config,
+        secret: impl Fn(&str) -> Option<String>,
+    ) -> Self {
         match cfg.tts.provider.as_str() {
-            "cartesia" => match crate::http::secret_opt("CARTESIA_API_KEY") {
+            "cartesia" => match secret("CARTESIA_API_KEY") {
                 Some(key) => Tts::Cartesia(CartesiaTts::new(&cfg.tts, key)),
                 None => {
                     tracing::warn!("CARTESIA_API_KEY not set; falling back to Piper");
                     Self::piper_or_disabled(cfg)
                 }
             },
-            "elevenlabs" => match crate::http::secret_opt("ELEVENLABS_API_KEY") {
+            "elevenlabs" => match secret("ELEVENLABS_API_KEY") {
                 Some(key) => Tts::ElevenLabs(ElevenLabsTts::new(&cfg.tts, key)),
                 None => {
                     tracing::warn!("ELEVENLABS_API_KEY not set; falling back to Piper");
                     Self::piper_or_disabled(cfg)
                 }
             },
-            "sarvam" => match crate::http::secret_opt("SARVAM_API_KEY") {
+            "sarvam" => match secret("SARVAM_API_KEY") {
                 Some(key) => Tts::Sarvam(Box::new(SarvamTts::new(&cfg.tts, key))),
                 None => {
                     tracing::warn!("SARVAM_API_KEY not set; falling back to Piper");
@@ -777,13 +787,14 @@ mod tests {
 
     #[test]
     fn provider_selection_falls_back_rather_than_failing() {
-        unsafe {
-            std::env::remove_var("CARTESIA_API_KEY");
-            std::env::remove_var("ELEVENLABS_API_KEY");
-        }
+        // Pure: `from_config_with` takes the key lookup as an argument instead
+        // of reading process-global env. Tests run in parallel threads and
+        // concurrent setenv/getenv is a data race (unsafe in edition 2024) —
+        // it passes locally and aborts on a CI runner with different
+        // scheduling.
         let mut cfg = crate::config::Config::default();
         cfg.tts.piper_binary = "/definitely/not/here/piper".into();
-        let t = Tts::from_config(&cfg);
+        let t = Tts::from_config_with(&cfg, |_| None);
         assert!(
             !t.is_enabled(),
             "no keys and no piper => text-only, but still boots"

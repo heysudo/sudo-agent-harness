@@ -138,10 +138,29 @@ impl SpotifyClient {
     /// Build from the environment, returning `None` when Spotify is not configured
     /// so the rest of the daemon runs fine without it.
     pub fn from_env(http: reqwest::Client, api_base: &str, device_name: &str) -> Option<Self> {
-        let id = crate::http::secret_opt("SPOTIFY_CLIENT_ID")?;
-        let secret = crate::http::secret_opt("SPOTIFY_CLIENT_SECRET")?;
-        let refresh = crate::http::secret_opt("SPOTIFY_REFRESH_TOKEN")?;
-        Some(Self::new(http, api_base, id, secret, refresh, device_name))
+        Self::from_secrets(http, api_base, device_name, crate::http::secret_opt)
+    }
+
+    /// Pure form of [`Self::from_env`]: `secret` supplies credentials instead
+    /// of the process environment, so tests never mutate a process-global (a
+    /// data race under parallel test threads; `unsafe` in edition 2024).
+    pub fn from_secrets(
+        http: reqwest::Client,
+        api_base: &str,
+        device_name: &str,
+        secret: impl Fn(&str) -> Option<String>,
+    ) -> Option<Self> {
+        let id = secret("SPOTIFY_CLIENT_ID")?;
+        let client_secret = secret("SPOTIFY_CLIENT_SECRET")?;
+        let refresh = secret("SPOTIFY_REFRESH_TOKEN")?;
+        Some(Self::new(
+            http,
+            api_base,
+            id,
+            client_secret,
+            refresh,
+            device_name,
+        ))
     }
 
     /// A valid access token, refreshing if needed.
@@ -525,17 +544,12 @@ mod tests {
 
     #[test]
     fn from_env_is_none_when_unconfigured() {
-        for k in [
-            "SPOTIFY_CLIENT_ID",
-            "SPOTIFY_CLIENT_SECRET",
-            "SPOTIFY_REFRESH_TOKEN",
-        ] {
-            unsafe { std::env::remove_var(k) };
-        }
-        let c = SpotifyClient::from_env(
+        // Pure: no env mutation (data race under parallel test threads).
+        let c = SpotifyClient::from_secrets(
             reqwest::Client::new(),
             "https://api.spotify.com/v1",
             "Hermit",
+            |_| None,
         );
         assert!(c.is_none(), "Spotify must be optional");
     }
