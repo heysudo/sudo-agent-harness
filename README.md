@@ -1,6 +1,5 @@
 <div align="center">
 
-
 # HERMIT
 
 **A voice-first personal agent that lives on a 1 GB Raspberry Pi.**
