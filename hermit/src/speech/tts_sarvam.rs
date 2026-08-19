@@ -18,9 +18,11 @@
 //! (repeatable) → `{"type":"flush"}`. Audio returns as base64 `linear16` in
 //! `{"type":"audio","data":{"audio":"…"}}`.
 //!
-//! The socket is held open between utterances: a cold TLS handshake is 100–400 ms
-//! against a 1.2 s first-audio budget. Measured first audio on a warm socket is
-//! ~450 ms for Odia.
+//! # Socket lifetime
+//!
+//! A warm socket is reused between utterances. Sarvam also closes sockets that
+//! idle a while, so a stale handle is dropped and redialed once per utterance.
+//! Measured first audio on a warm socket is ~450 ms for Odia.
 
 use crate::audio::AudioPlayer;
 use crate::speech::tts::{SpeakResult, TextRx};
@@ -41,9 +43,10 @@ pub struct SarvamTts {
     speaker: String,
     sample_rate: u32,
     connect_timeout: Duration,
-    conn: Mutex<Option<WsStream>>,
+    /// Warm socket + last-use instant. Sarvam idle-closes sockets, so a
+    /// stale one is discarded and redialed instead of being spoken into.
+    conn: Mutex<Option<(WsStream, Instant)>>,
 }
-
 impl SarvamTts {
     pub fn new(cfg: &crate::config::Tts, api_key: String) -> Self {
         Self {
@@ -126,7 +129,7 @@ impl SarvamTts {
             return;
         }
         match self.connect().await {
-            Ok(ws) => *guard = Some(ws),
+            Ok(ws) => *guard = Some((ws, Instant::now())),
             Err(e) => {
                 tracing::warn!(error = %e, "sarvam tts prewarm failed; will retry on demand")
             }
@@ -140,21 +143,26 @@ impl SarvamTts {
         generation: u64,
     ) -> Result<SpeakResult> {
         let mut guard = self.conn.lock().await;
-        if guard.is_none() {
-            *guard = Some(self.connect().await?);
-        }
+        // Reuse a warm socket only if it was used moments ago; Sarvam
+        // idle-closes them and a dead socket downgrades the turn to silence.
+        let mut ws = match guard.take() {
+            Some((ws, last)) if last.elapsed() < Duration::from_secs(30) => ws,
+            _ => self.connect().await?,
+        };
 
+        drop(guard);
         let result = self
-            .stream_utterance(guard.as_mut().unwrap(), text_rx, player, generation)
+            .stream_utterance(&mut ws, text_rx, player, generation)
             .await;
 
         match result {
-            Ok(r) => Ok(r),
+            Ok(r) => {
+                // Socket survived the utterance — keep it warm for the next one.
+                *self.conn.lock().await = Some((ws, Instant::now()));
+                Ok(r)
+            }
             Err(e) => {
-                // A failed utterance usually means a dead socket. Drop it so the
-                // next call reconnects rather than failing forever.
                 tracing::warn!(error = %e, "sarvam tts utterance failed; dropping connection");
-                *guard = None;
                 Err(e)
             }
         }

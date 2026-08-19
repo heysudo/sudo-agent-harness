@@ -13,7 +13,8 @@ cli = true                   # read turns from stdin (used by scripts/bench.sh)
 [paths]
 data_dir = "/var/lib/hermit"        # SQLite + the learned core.md
 config_dir = "/opt/hermit/config"   # this tree
-ack_dir = "/dev/shm/hermit-acks"    # tmpfs; pre-synthesized acknowledgments
+ack_dir = "/var/lib/hermit/acks"    # persistent; tmpfs is wiped on reboot and a
+                                    # cold boot races the network, losing every ack
 
 [llm]
 base_url = "https://api.cerebras.ai/v1"

@@ -65,7 +65,7 @@ impl Default for Paths {
         Self {
             data_dir: "/var/lib/hermit".into(),
             config_dir: "/opt/hermit/config".into(),
-            ack_dir: "/dev/shm/hermit-acks".into(),
+            ack_dir: "/var/lib/hermit/acks".into(),
         }
     }
 }
