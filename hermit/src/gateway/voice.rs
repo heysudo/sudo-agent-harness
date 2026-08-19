@@ -17,8 +17,8 @@ use super::Gateway;
 use crate::speech::earcons::Earcons;
 use crate::speech::stt::{Deepgram, SttEvent, TranscriptBuilder};
 use crate::speech::wake::{FrameFeeder, WakeDetector};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// dBFS of a mono i16 frame, for the console level meter.
@@ -71,8 +71,9 @@ pub async fn run(
 
     let mut feeder = FrameFeeder::new(detector);
     let listening = Arc::new(AtomicBool::new(false));
+    let speaker_muted = Arc::new(AtomicBool::new(false));
     // Console telemetry + control (sudo-console). All throttled internally.
-    let mut state = crate::state_io::StateWriter::new();
+    let state = Arc::new(Mutex::new(crate::state_io::StateWriter::new()));
     // UI sounds (b2-34 earcons): instant wake ack + end-of-speech "working on it".
     let earcons = Arc::new(Earcons::load());
 
@@ -85,10 +86,14 @@ pub async fn run(
                 Some(samples) => {
                     // Console control: mic mute discards frames BEFORE the wake word
                     // and STT — nothing is detected, nothing leaves the device.
-                    let ctl = state.read_control();
-                    gateway.player.set_muted(ctl.speaker_muted);
+                    let ctl = state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .read_control();
+                    apply_console_control(&gateway, ctl, &speaker_muted).await;
+                    let mut state_guard = state.lock().unwrap_or_else(|e| e.into_inner());
                     if ctl.mic_muted {
-                        state.write_live(serde_json::json!({
+                        state_guard.write_live(serde_json::json!({
                             "ww": null, "rms": -99.0, "listening": false,
                             "mic_muted": true, "speaker_muted": ctl.speaker_muted,
                         }));
@@ -101,14 +106,14 @@ pub async fn run(
                     }
                     let hit = feeder.push(&samples).is_some();
                     let (score, threshold) = feeder.last_score().unwrap_or((0.0, 0.0));
-                    state.write_live(serde_json::json!({
+                    state_guard.write_live(serde_json::json!({
                         "ww": score, "ww_threshold": threshold,
                         "rms": frame_dbfs(&samples), "listening": false,
                         "mic_muted": false, "speaker_muted": ctl.speaker_muted,
                     }));
                     if hit {
                         feeder.reset();
-                        state.emit("ww_fired", serde_json::json!({"score": score}));
+                        state_guard.emit("ww_fired", serde_json::json!({"score": score}));
                         tracing::info!("wake word detected");
                     }
                     hit
@@ -121,6 +126,8 @@ pub async fn run(
                         continue;
                     }
                     tracing::info!("manual listen trigger");
+                    state.lock().unwrap_or_else(|e| e.into_inner())
+                        .emit("manual_trigger", serde_json::json!({}));
                     feeder.reset();
                     true
                 }
@@ -150,6 +157,8 @@ pub async fn run(
         let dg = deepgram.clone();
         let flag = listening.clone();
         let ec = earcons.clone();
+        let turn_state = state.clone();
+        let turn_speaker_muted = speaker_muted.clone();
         // 128 x 20 ms = ~2.5 s of audio, comfortably covering the Deepgram
         // handshake so early speech is not lost while the socket opens.
         let (utt_tx, utt_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(128);
@@ -157,14 +166,23 @@ pub async fn run(
         // The utterance task owns STT and the turn; the capture loop keeps feeding
         // it audio until it signals completion.
         let handle = tokio::spawn(async move {
-            let result = transcribe_and_answer(gw.clone(), dg, utt_rx, wake_at, ec).await;
+            let result =
+                transcribe_and_answer(gw.clone(), dg, utt_rx, wake_at, ec, turn_state).await;
             gw.music.unduck().await;
             flag.store(false, Ordering::Release);
             result
         });
 
         // Forward microphone audio to the utterance task until it finishes.
-        forward_until_done(&mut mic_rx, utt_tx, &listening).await;
+        forward_until_done(
+            &mut mic_rx,
+            utt_tx,
+            &listening,
+            &state,
+            &gateway,
+            &turn_speaker_muted,
+        )
+        .await;
         let _ = handle.await;
     }
 
@@ -173,10 +191,47 @@ pub async fn run(
 
 /// Pump microphone audio into the utterance channel until the turn releases the
 /// listening flag or the channel closes.
-async fn forward_until_done(mic_rx: &mut MicRx, utt_tx: MicTx, listening: &AtomicBool) {
+async fn apply_console_control(
+    gateway: &Gateway,
+    ctl: crate::state_io::Control,
+    applied_speaker_mute: &AtomicBool,
+) {
+    gateway.player.set_muted(ctl.speaker_muted);
+    let previous = applied_speaker_mute.swap(ctl.speaker_muted, Ordering::AcqRel);
+    if previous != ctl.speaker_muted {
+        if ctl.speaker_muted {
+            let _ = gateway.player.flush().await;
+        }
+        gateway.music.set_muted(ctl.speaker_muted).await;
+    }
+}
+
+async fn forward_until_done(
+    mic_rx: &mut MicRx,
+    utt_tx: MicTx,
+    listening: &AtomicBool,
+    state: &Arc<Mutex<crate::state_io::StateWriter>>,
+    gateway: &Gateway,
+    applied_speaker_mute: &AtomicBool,
+) {
     while listening.load(Ordering::Acquire) {
         match tokio::time::timeout(Duration::from_millis(100), mic_rx.recv()).await {
             Ok(Some(samples)) => {
+                let ctl = {
+                    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                    let ctl = state.read_control();
+                    state.write_live(serde_json::json!({
+                        "rms": if ctl.mic_muted { -99.0 } else { frame_dbfs(&samples) },
+                        "listening": !ctl.mic_muted,
+                        "mic_muted": ctl.mic_muted,
+                        "speaker_muted": ctl.speaker_muted,
+                    }));
+                    ctl
+                };
+                apply_console_control(gateway, ctl, applied_speaker_mute).await;
+                if ctl.mic_muted {
+                    continue;
+                }
                 match utt_tx.try_send(samples) {
                     Ok(()) => {}
                     // The utterance channel is momentarily full — this happens
@@ -207,6 +262,7 @@ async fn transcribe_and_answer(
     mut mic_rx: MicRx,
     wake_at: std::time::Instant,
     earcons: Arc<Earcons>,
+    state: Arc<Mutex<crate::state_io::StateWriter>>,
 ) -> Option<String> {
     let (audio_tx, mut events) = match deepgram.start().await {
         Ok(x) => x,
@@ -238,17 +294,22 @@ async fn transcribe_and_answer(
         match &ev {
             SttEvent::Interim(_) | SttEvent::Final(_) => {
                 builder.apply(&ev);
+                let provisional = builder.provisional();
+                state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .write_live(serde_json::json!({
+                        "transcript_interim": provisional,
+                    }));
                 // Speculative prefetch (spec §5): fire once, before the user has
                 // finished speaking, when the partial looks like a lookup.
-                if prefetch.is_none() {
-                    let provisional = builder.provisional();
-                    if provisional != prefetched_for
-                        && let Some(p) =
-                            crate::orchestrator::spawn_prefetch(&gateway.orch.tools, &provisional)
-                    {
-                        prefetched_for = provisional;
-                        prefetch = Some(p);
-                    }
+                if prefetch.is_none()
+                    && provisional != prefetched_for
+                    && let Some(p) =
+                        crate::orchestrator::spawn_prefetch(&gateway.orch.tools, &provisional)
+                {
+                    prefetched_for = provisional;
+                    prefetch = Some(p);
                 }
             }
             SttEvent::EndOfSpeech(_) => {
@@ -265,14 +326,36 @@ async fn transcribe_and_answer(
     }
 
     pump.abort();
+    // Wait for cancellation so the utterance receiver is dropped immediately. This
+    // stops the capture forwarder at end-of-speech; the turn-level flag remains set
+    // until the answer finishes, but the TUI no longer says LISTENING or overwrites
+    // the finalized transcript with live meter updates.
+    let _ = pump.await;
 
     let utterance = builder.finished();
     if utterance.trim().is_empty() {
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        state.write_live(serde_json::json!({
+            "transcript_interim": "", "listening": false,
+        }));
+        state.emit("no_speech", serde_json::json!({}));
         tracing::info!("no speech captured after wake word");
         if let Some(p) = prefetch {
             p.handle.abort();
         }
         return None;
+    }
+
+    {
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        state.write_live(serde_json::json!({
+            "transcript_interim": "", "last_user": utterance,
+            "listening": false,
+        }));
+        state.emit(
+            "transcript",
+            serde_json::json!({"role": "user", "text": utterance}),
+        );
     }
 
     // Discard a prefetch that no longer matches the finalized transcript.
@@ -305,9 +388,32 @@ async fn transcribe_and_answer(
                     tracing::warn!("response-complete cue could not be drained");
                 }
             }
+            {
+                let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                state.write_live(serde_json::json!({"last_answer": r.answer}));
+                state.emit(
+                    "transcript",
+                    serde_json::json!({"role": "assistant", "text": r.answer}),
+                );
+                state.emit(
+                    "turn_complete",
+                    serde_json::json!({
+                        "utterance": utterance,
+                        "answer": r.answer,
+                        "speech_completed": r.speech_completed,
+                    }),
+                );
+            }
             Some(r.answer)
         }
         Err(e) => {
+            state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .emit(
+                    "turn_error",
+                    serde_json::json!({"utterance": utterance, "error": e.to_string()}),
+                );
             tracing::error!(error = ?e, "voice turn failed");
             None
         }

@@ -33,6 +33,8 @@ struct State {
     volume: u8,
     /// Reference count so nested voice + TTS scopes cannot unduck each other early.
     duck_depth: u32,
+    /// Operator console hard mute; nominal volume is retained for unmute.
+    muted: bool,
     now_playing: Option<String>,
 }
 
@@ -68,10 +70,23 @@ impl MusicController {
                 source: Source::None,
                 volume: default_volume.min(100),
                 duck_depth: 0,
+                muted: false,
                 now_playing: None,
             }),
             volume_transition: tokio::sync::Mutex::new(()),
             duck_db,
+        }
+    }
+
+    fn effective_volume(&self, st: &State) -> u8 {
+        if st.muted {
+            0
+        } else if st.duck_depth > 0 {
+            (st.volume as f32 * db_to_scale(self.duck_db))
+                .round()
+                .clamp(0.0, 100.0) as u8
+        } else {
+            st.volume
         }
     }
 
@@ -197,13 +212,7 @@ impl MusicController {
             let mut st = self.state.write().await;
             st.source = Source::Spotify;
             st.now_playing = Some(label.clone());
-            if st.duck_depth > 0 {
-                (st.volume as f32 * db_to_scale(self.duck_db))
-                    .round()
-                    .clamp(0.0, 100.0) as u8
-            } else {
-                st.volume
-            }
+            self.effective_volume(&st)
         };
         let _ = sp.set_volume(vol).await;
         Ok(label)
@@ -244,13 +253,7 @@ impl MusicController {
             let mut st = self.state.write().await;
             st.source = Source::Radio;
             st.now_playing = Some(label.to_string());
-            if st.duck_depth > 0 {
-                (st.volume as f32 * db_to_scale(self.duck_db))
-                    .round()
-                    .clamp(0.0, 100.0) as u8
-            } else {
-                st.volume
-            }
+            self.effective_volume(&st)
         };
         self.mpv.set_volume(vol).await?;
         Ok(())
@@ -315,13 +318,7 @@ impl MusicController {
         let target = {
             let mut st = self.state.write().await;
             st.volume = v;
-            if st.duck_depth > 0 {
-                (v as f32 * db_to_scale(self.duck_db))
-                    .round()
-                    .clamp(0.0, 100.0) as u8
-            } else {
-                v
-            }
+            self.effective_volume(&st)
         };
         self.apply_volume(target).await
     }
@@ -345,6 +342,25 @@ impl MusicController {
         self.state.read().await.volume
     }
 
+    /// Hard mute for the operator console. Radio/Spotify are reduced to zero;
+    /// HERMIT speech is muted separately by the gateway using the same lease.
+    pub async fn set_muted(&self, muted: bool) {
+        let _transition = self.volume_transition.lock().await;
+        let (changed, target) = {
+            let mut st = self.state.write().await;
+            let changed = st.muted != muted;
+            st.muted = muted;
+            (changed, self.effective_volume(&st))
+        };
+        if changed && let Err(e) = self.apply_volume(target).await {
+            tracing::warn!(error = %e, muted, "console music mute failed");
+        }
+    }
+
+    pub async fn is_muted(&self) -> bool {
+        self.state.read().await.muted
+    }
+
     // -----------------------------------------------------------------
     // Ducking (spec §7)
     // -----------------------------------------------------------------
@@ -356,7 +372,7 @@ impl MusicController {
             let mut st = self.state.write().await;
             let first = st.duck_depth == 0;
             st.duck_depth = st.duck_depth.saturating_add(1);
-            if !first || st.source == Source::None {
+            if !first || st.source == Source::None || st.muted {
                 (false, 0)
             } else {
                 let scaled = (st.volume as f32 * db_to_scale(self.duck_db)).round();
@@ -377,7 +393,10 @@ impl MusicController {
                 (false, 0)
             } else {
                 st.duck_depth -= 1;
-                (st.duck_depth == 0 && st.source != Source::None, st.volume)
+                (
+                    st.duck_depth == 0 && st.source != Source::None && !st.muted,
+                    st.volume,
+                )
             }
         };
         if should && let Err(e) = self.apply_volume(target).await {
@@ -451,6 +470,22 @@ mod tests {
         assert!((db_to_scale(0.0) - 1.0).abs() < 1e-6);
         // The §2 speaker-protection ceiling: sqrt(3/5) ~= 0.775 ~= -2.2 dB.
         assert!((db_to_scale(-2.2) - 0.7762).abs() < 0.005);
+    }
+
+    #[tokio::test]
+    async fn console_mute_preserves_nominal_volume_and_forces_zero_output() {
+        let c = controller(-12.0);
+        c.set_muted(true).await;
+        assert!(c.is_muted().await);
+        c.set_volume(85).await.unwrap();
+        let st = c.state.read().await;
+        assert_eq!(st.volume, 85);
+        assert_eq!(c.effective_volume(&st), 0);
+        drop(st);
+        c.set_muted(false).await;
+        let st = c.state.read().await;
+        assert!(!st.muted);
+        assert_eq!(c.effective_volume(&st), 85);
     }
 
     #[tokio::test]
