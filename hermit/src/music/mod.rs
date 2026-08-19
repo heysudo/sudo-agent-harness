@@ -203,18 +203,51 @@ impl MusicController {
     }
 
     pub async fn play_spotify(&self, query: &str) -> Result<String> {
+        {
+            let _transition = self.volume_transition.lock().await;
+            let sp = self.spotify()?;
+            // Radio and Spotify share one output device; stop the other first.
+            let _ = self.mpv.stop().await;
+            match sp.play_query(query).await {
+                Ok(label) => {
+                    let vol = {
+                        let mut st = self.state.write().await;
+                        st.source = Source::Spotify;
+                        st.now_playing = Some(label.clone());
+                        self.effective_volume(&st)
+                    };
+                    let _ = sp.set_volume(vol).await;
+                    return Ok(label);
+                }
+                Err(e) => {
+                    // Spotify accepted but produced no audio (the audio-key DRM
+                    // refusal), or search/playback failed outright. Don't leave
+                    // the user in silence — fall through to YouTube via mpv.
+                    tracing::warn!(error = %e, query, "spotify failed; falling back to youtube");
+                }
+            }
+        } // release the transition lock; play_youtube takes it again
+        self.play_youtube(query).await
+    }
+
+    /// Fallback source: resolve `query` on YouTube through mpv's ytdl hook.
+    /// Used when Spotify cannot produce audio (DRM key refusals, outages).
+    pub async fn play_youtube(&self, query: &str) -> Result<String> {
         let _transition = self.volume_transition.lock().await;
-        let sp = self.spotify()?;
-        // Radio and Spotify share one output device; stop the other first.
-        let _ = self.mpv.stop().await;
-        let label = sp.play_query(query).await?;
+        if let Some(sp) = &self.spotify {
+            let _ = sp.pause().await;
+        }
+        // ytsearch1: picks the top result; mpv shells out to yt-dlp.
+        let target = format!("ytdl://ytsearch1:{query}");
+        self.mpv.loadfile(&target).await?;
+        let label = format!("{query} (via YouTube)");
         let vol = {
             let mut st = self.state.write().await;
-            st.source = Source::Spotify;
+            st.source = Source::Radio; // mpv-owned source: pause/resume/stop route to mpv
             st.now_playing = Some(label.clone());
             self.effective_volume(&st)
         };
-        let _ = sp.set_volume(vol).await;
+        self.mpv.set_volume(vol).await?;
         Ok(label)
     }
 
