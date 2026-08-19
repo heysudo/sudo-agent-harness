@@ -260,6 +260,18 @@ impl TranscriptBuilder {
         self.finalized.join(" ").trim().to_string()
     }
 
+    /// The utterance to answer with. Prefer finalized segments; if the listen cap
+    /// (or an early close) cut the turn short before end-of-speech, fall back to
+    /// the interim transcript so the user's speech is not lost.
+    pub fn best_utterance(&self) -> String {
+        let finalized = self.finished();
+        if finalized.trim().is_empty() {
+            self.provisional()
+        } else {
+            finalized
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.finalized.is_empty() && self.interim.is_empty()
     }
@@ -359,6 +371,26 @@ mod tests {
         let b = TranscriptBuilder::default();
         assert!(b.is_empty());
         assert_eq!(b.finished(), "");
+    }
+
+    #[test]
+    fn best_utterance_falls_back_to_interim_when_nothing_finalized() {
+        let mut b = TranscriptBuilder::default();
+        assert_eq!(b.best_utterance(), "");
+        b.apply(&SttEvent::Interim("how's the weather in Kormangla".into()));
+        assert_eq!(
+            b.best_utterance(),
+            "how's the weather in Kormangla",
+            "interim survives when the listen cap cuts the turn short"
+        );
+        b.apply(&SttEvent::EndOfSpeech(
+            "how's the weather in Kormangla going to be".into(),
+        ));
+        assert_eq!(
+            b.best_utterance(),
+            "how's the weather in Kormangla going to be",
+            "finalized wins once end-of-speech arrives"
+        );
     }
 
     #[test]

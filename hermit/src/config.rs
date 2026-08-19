@@ -255,7 +255,9 @@ pub struct Stt {
     /// Deepgram endpointing in milliseconds of trailing silence.
     pub endpointing_ms: u32,
     pub sample_rate: u32,
-    /// Give up on a stalled STT socket.
+    /// Hard cap on how long the mic stays open after the wake word. When reached,
+    /// the turn finalizes with whatever was transcribed (interim included) rather
+    /// than listening forever on a noisy line that never trips endpointing.
     pub max_utterance_ms: u64,
 }
 
@@ -267,7 +269,7 @@ impl Default for Stt {
             language: "en-US".into(),
             endpointing_ms: 300,
             sample_rate: 16_000,
-            max_utterance_ms: 20_000,
+            max_utterance_ms: 8_000,
         }
     }
 }

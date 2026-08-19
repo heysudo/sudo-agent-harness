@@ -332,7 +332,7 @@ async fn transcribe_and_answer(
     // the finalized transcript with live meter updates.
     let _ = pump.await;
 
-    let utterance = builder.finished();
+    let utterance = builder.best_utterance();
     if utterance.trim().is_empty() {
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
         state.write_live(serde_json::json!({

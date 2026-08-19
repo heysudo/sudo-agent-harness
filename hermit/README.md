@@ -69,7 +69,7 @@ fixed root-owned helper with a narrowly scoped sudoers rule; the TUI never recei
 general root access.
 
 ```bash
-cargo test            # 214 tests, no network or API keys needed
+cargo test            # 215 tests, no network or API keys needed
 cargo run -- check --config config/hermit.toml   # validate config
 ```
 
@@ -184,7 +184,7 @@ is the *normal* mode id here).
 
 ## Verification status
 
-**Verified here** — 214 tests pass on the dev machine with no network and no API keys:
+**Verified here** — 215 tests pass on the dev machine with no network and no API keys:
 the chunker, router, memory and firewall, tool schemas and dispatch, SSE decoding and
 streaming tool-call reassembly, the 2-round cap, mpv IPC (against a fake mpv speaking
 the real dialect), audio mixing and barge-in generation logic, and the Cartesia/
