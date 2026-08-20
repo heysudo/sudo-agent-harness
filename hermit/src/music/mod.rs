@@ -11,7 +11,7 @@ pub use mpv::MpvClient;
 pub use spotify::SpotifyClient;
 
 use crate::router::DeviceCommand;
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -237,10 +237,18 @@ impl MusicController {
         if let Some(sp) = &self.spotify {
             let _ = sp.pause().await;
         }
-        // ytsearch1: picks the top result; mpv shells out to yt-dlp.
-        let target = format!("ytdl://ytsearch1:{query}");
-        self.mpv.loadfile(&target).await?;
-        let label = format!("{query} (via YouTube)");
+        // Resolve with yt-dlp OURSELVES rather than through mpv's ytdl hook.
+        // The hook wraps chaptered videos in an EDL and loses the resolved
+        // client's HTTP headers on those sub-streams; googlevideo then 403s a
+        // URL that works fine when the User-Agent matches (verified live:
+        // curl with yt-dlp's UA got 206 on the same URL ffmpeg 403'd on).
+        // Feeding mpv the direct URL + matching UA sidesteps the whole class.
+        let resolved = resolve_youtube(query).await?;
+        self.mpv
+            .set_property("user-agent", serde_json::json!(resolved.user_agent))
+            .await?;
+        self.mpv.loadfile(&resolved.url).await?;
+        let label = format!("{} (via YouTube)", resolved.title);
         let vol = {
             let mut st = self.state.write().await;
             st.source = Source::Radio; // mpv-owned source: pause/resume/stop route to mpv
@@ -249,11 +257,14 @@ impl MusicController {
         };
         self.mpv.set_volume(vol).await?;
         // Same honesty bar as Spotify: never tell the user "playing" until
-        // audio time is actually advancing. yt-dlp resolution takes a few
-        // seconds; a failed resolve leaves mpv idle rather than erroring the
-        // loadfile command, so loadfile's Ok() proves nothing by itself.
+        // audio time is actually advancing. A failed resolve leaves mpv idle
+        // rather than erroring the loadfile command, so loadfile's Ok() proves
+        // nothing by itself. The window is generous because it must cover the
+        // WHOLE resolve on a Pi 4: yt-dlp's search + JSON dump alone measured
+        // ~10-11 s there, and mpv still has to open the stream after that — a
+        // 15 s ceiling was killing playback moments before first audio.
         let mut last: Option<f64> = None;
-        for _ in 0..30 {
+        for _ in 0..60 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let Ok(v) = self.mpv.get_property("playback-time").await else {
                 continue;
@@ -512,6 +523,64 @@ impl MusicController {
 /// Shared handle.
 pub type Music = Arc<MusicController>;
 
+/// A YouTube stream resolved by yt-dlp: direct audio URL, the User-Agent the
+/// resolving client presented (googlevideo binds the URL to it), and a human
+/// title for "now playing".
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedStream {
+    pub url: String,
+    pub user_agent: String,
+    pub title: String,
+}
+
+/// Best-audio resolve via the yt-dlp binary (`ytsearch1:` picks the top hit).
+/// ~10 s on a Pi 4; bounded at 35 s so a wedged resolver cannot hang the turn.
+async fn resolve_youtube(query: &str) -> Result<ResolvedStream> {
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(35),
+        tokio::process::Command::new("yt-dlp")
+            .arg("-f")
+            .arg("ba")
+            .arg("-j")
+            .arg("--no-warnings")
+            .arg(format!("ytsearch1:{query}"))
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("yt-dlp timed out resolving {query:?}"))?
+    .context("spawning yt-dlp (is it installed and on PATH?)")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "yt-dlp could not resolve {query:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .take(300)
+                .collect::<String>()
+        );
+    }
+    parse_ytdlp_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Extract url/UA/title from `yt-dlp -j` output. Split out for testability.
+fn parse_ytdlp_json(raw: &str) -> Result<ResolvedStream> {
+    let v: serde_json::Value =
+        serde_json::from_str(raw.trim()).context("yt-dlp emitted unparseable JSON")?;
+    let url = v["url"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("yt-dlp JSON has no direct url"))?
+        .to_string();
+    let user_agent = v["http_headers"]["User-Agent"]
+        .as_str()
+        .unwrap_or("Mozilla/5.0")
+        .to_string();
+    let title = v["title"].as_str().unwrap_or("YouTube audio").to_string();
+    Ok(ResolvedStream {
+        url,
+        user_agent,
+        title,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,6 +665,22 @@ mod tests {
         assert_eq!(c.nudge_volume(10).await.unwrap(), 100);
         c.set_volume(5).await.unwrap();
         assert_eq!(c.nudge_volume(-10).await.unwrap(), 0);
+    }
+
+    #[test]
+    fn ytdlp_json_parses_url_ua_and_title() {
+        let raw = r#"{"title":"Some Song","url":"https://rr1.example/videoplayback?x=1",
+            "http_headers":{"User-Agent":"com.google.android.apps.youtube.vr"}}"#;
+        let r = parse_ytdlp_json(raw).unwrap();
+        assert_eq!(r.url, "https://rr1.example/videoplayback?x=1");
+        assert_eq!(r.user_agent, "com.google.android.apps.youtube.vr");
+        assert_eq!(r.title, "Some Song");
+    }
+
+    #[test]
+    fn ytdlp_json_without_url_is_an_error_not_a_panic() {
+        assert!(parse_ytdlp_json(r#"{"title":"x"}"#).is_err());
+        assert!(parse_ytdlp_json("not json").is_err());
     }
 
     #[tokio::test]

@@ -392,9 +392,28 @@ impl SpotifyClient {
                 && cur > prev
             {
                 advanced_ms += cur - prev;
-                // Two full seconds of forward motion means real, decoded audio.
+                // Two seconds of forward motion — but do not claim success yet.
+                // A DRM-refused track ALSO advances position for ~3s while the
+                // decoder chews on undecryptable bytes, then librespot skips it
+                // and stops ("no more tracks left in queue" — observed live:
+                // load 11:54:15, audio-key refusal :16, skip :18, and this gate
+                // returned Ok at exactly the skip). Hold the claim and confirm
+                // after the doomed window has passed: a skipped track no longer
+                // matches, a stalled one no longer advances; only real, decoded
+                // audio does both.
                 if advanced_ms >= 2000 {
-                    return Ok(());
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                    let confirm = self.state().await.ok();
+                    let still_playing = confirm.as_ref().is_some_and(|c| {
+                        playback_matches(c, uri) && c.progress_ms > state.progress_ms
+                    });
+                    if still_playing {
+                        return Ok(());
+                    }
+                    tracing::warn!(
+                        "spotify progress advanced then died (DRM skip); treating as stall"
+                    );
+                    break;
                 }
             }
             last_progress = state.progress_ms;
