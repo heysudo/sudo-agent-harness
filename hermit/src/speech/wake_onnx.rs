@@ -27,6 +27,22 @@
 //! `libonnxruntime.so` degrades to "wake word disabled" exactly like the Porcupine
 //! path — the daemon still serves text, voice-via-`/listen`, and everything else.
 
+// # Streaming rewrite (2026-08-20)
+//
+// The first port recomputed the FULL 2 s pipeline (mel over 32000 samples +
+// 16 embeddings + classifier) on every score: ~204 ms on the Pi 4. Even at a
+// 4-frame stride that blocked the mic consumer long enough under music load
+// (mpv + radio decode) that capture chunks were dropped — and a detector fed
+// gapped audio scores near zero regardless of what was said. Observed live:
+// score 0.005 while the user shouted the phrase at 60 cm with music playing,
+// 19 "mic consumer lagging" warnings in 30 minutes, hermit at 75% CPU.
+//
+// This version is incremental, mirroring openWakeWord's streaming extractor:
+// per 80 ms frame it computes mel for just that chunk (with 480 samples of
+// context), one embedding when 8 new mel frames have accumulated, and one
+// classifier pass — ~15-20 ms per frame. The consumer never starves, and
+// every frame is scored instead of every 4th.
+
 use super::wake::WakeDetector;
 use anyhow::{Result, bail};
 use ndarray::{Array2, Array3, Array4, ArrayD};
@@ -38,7 +54,6 @@ use std::path::{Path, PathBuf};
 const FRAME_SAMPLES: usize = 1280;
 /// 25 × 80 ms = 2.0 s window the classifier expects.
 const WINDOW_FRAMES: usize = 25;
-const WINDOW_SAMPLES: usize = FRAME_SAMPLES * WINDOW_FRAMES; // 32000
 /// Mel frames per embedding, and stride between them (livekit-wakeword constants).
 const EMBEDDING_WINDOW: usize = 76;
 const EMBEDDING_STRIDE: usize = 8;
@@ -50,24 +65,35 @@ const MEL_BINS: usize = 32;
 /// Reference default from `livekit.wakeword` / openWakeWord.
 pub const DEFAULT_THRESHOLD: f32 = 0.5;
 
-/// Score every Nth 80 ms frame rather than every frame.
+/// Raw-audio left context carried between chunks for streaming mel extraction.
 ///
-/// Measured on the Pi 4: one full-window score (mel + 9 embeddings + classifier)
-/// costs ~200 ms. Scoring every 80 ms frame therefore runs ~2.5x behind real time;
-/// the mic channel backs up, ALSA overruns, and the detector ends up scoring gapped
-/// audio — live scores collapse to a fraction of what the same audio scores offline
-/// (observed: 0.16 live vs 0.80 offline on an identical utterance). At stride 4 the
-/// scoring cadence is 320 ms > cost, the pipeline keeps up, and a 2 s window still
-/// overlaps the phrase several times. Worst-case added detection latency: 320 ms.
-const SCORE_STRIDE_FRAMES: u32 = 4;
+/// The mel transform uses a 400-sample window at a 160-sample hop. Prepending
+/// 480 samples (3 hops) of the previous chunk to each new 1280-sample chunk and
+/// keeping the LAST 8 mel frames yields hop-aligned, contiguous mel frames —
+/// the same trick openWakeWord's streaming feature extractor uses.
+const MEL_CONTEXT_SAMPLES: usize = 480;
+/// Mel frames produced per 80 ms chunk (1280 samples / 160-sample hop).
+const MEL_FRAMES_PER_CHUNK: usize = 8;
 
 pub struct HeySudo {
     mel: Session,
     embed: Session,
     classifier: Session,
     threshold: f32,
-    /// Rolling 2 s audio window, oldest-first, one Vec per 80 ms frame.
-    window: std::collections::VecDeque<Vec<i16>>,
+    /// Software gain applied to each sample before the mel transform. The
+    /// XVF3800's beamformed voice channel is quiet (~-35 dBFS speech); the
+    /// training data was normal-level audio, so at native level real phrases
+    /// score far below their offline scores. Same fix as stt.sarvam_gain.
+    gain: f32,
+    /// Last 480 raw samples of the previous chunk: left context so each
+    /// chunk's mel frames are hop-aligned and contiguous with the last.
+    mel_context: Vec<i16>,
+    /// Rolling mel-frame buffer (newest last), capped at EMBEDDING_WINDOW.
+    mel_frames: std::collections::VecDeque<[f32; MEL_BINS]>,
+    /// Mel frames accumulated since the last embedding was computed.
+    mel_since_embed: usize,
+    /// Rolling embedding buffer (newest last), capped at MIN_EMBEDDINGS.
+    embeddings: std::collections::VecDeque<Vec<f32>>,
     /// Refractory counter: suppress re-triggers for a few frames after a fire so one
     /// utterance does not produce a burst of wakes.
     cooldown: usize,
@@ -75,8 +101,6 @@ pub struct HeySudo {
     /// detector that is silently starved of audio looks identical to a quiet room.
     windows_scored: u64,
     recent_max: f32,
-    /// Frames since the last score, for [`SCORE_STRIDE_FRAMES`].
-    frames_since_score: u32,
     /// Rolling average score cost, surfaced in the heartbeat so a regression in
     /// scoring speed is visible in logs rather than as mysteriously low scores.
     avg_score_ms: f32,
@@ -94,7 +118,7 @@ fn model_dir() -> PathBuf {
 impl HeySudo {
     /// Load the three graphs. `keyword_path` overrides the classifier location; the
     /// two upstream resources are always looked up in the model dir.
-    pub fn load(classifier_path: Option<&Path>, threshold: f32) -> Result<Self> {
+    pub fn load(classifier_path: Option<&Path>, threshold: f32, gain: f32) -> Result<Self> {
         let dir = model_dir();
         let mel_path = dir.join("melspectrogram.onnx");
         let embed_path = dir.join("embedding_model.onnx");
@@ -149,11 +173,16 @@ impl HeySudo {
             embed,
             classifier,
             threshold,
-            window: std::collections::VecDeque::with_capacity(WINDOW_FRAMES),
+            gain: if gain > 0.0 { gain } else { 1.0 },
+            mel_context: Vec::new(),
+            mel_frames: std::collections::VecDeque::with_capacity(
+                EMBEDDING_WINDOW + MEL_FRAMES_PER_CHUNK,
+            ),
+            mel_since_embed: 0,
+            embeddings: std::collections::VecDeque::with_capacity(MIN_EMBEDDINGS),
             cooldown: 0,
             windows_scored: 0,
             recent_max: 0.0,
-            frames_since_score: 0,
             avg_score_ms: 0.0,
             last_score: 0.0,
         })
@@ -165,56 +194,76 @@ impl HeySudo {
         } else {
             DEFAULT_THRESHOLD
         };
-        Self::load(cfg.keyword_path.as_deref(), threshold)
+        Self::load(cfg.keyword_path.as_deref(), threshold, cfg.gain)
     }
 
-    /// Score the current 2 s window. Returns the classifier probability in [0, 1].
+    /// Advance the streaming pipeline by one 80 ms chunk and score.
     ///
-    /// Mirrors `WakeWordModel.predict` exactly: mel over the whole window, then
-    /// 76-frame embedding windows at stride 8, then the last 16 embeddings through
-    /// the classifier.
-    fn score_window(&mut self) -> Result<f32> {
-        // ---- assemble the 2 s window as f32 in [-1, 1) ----------------------
-        let mut audio = Vec::with_capacity(WINDOW_SAMPLES);
-        for frame in &self.window {
-            for &s in frame {
-                audio.push(s as f32 / 32768.0);
-            }
+    /// Semantically identical to the reference full-window computation: after
+    /// warm-up, embedding i covers mel frames [8i, 8i+76) exactly as the
+    /// batch version's stride-8 slices do — the classifier sees the same
+    /// (16, 96) sequence, it is just built incrementally. Cost per frame is
+    /// one small mel + ONE embedding + one classifier (~15 ms on the Pi 4)
+    /// versus mel-over-2s + SIXTEEN embeddings (~204 ms) for the batch form.
+    fn step(&mut self, frame: &[i16]) -> Result<Option<f32>> {
+        // ---- mel over [context | chunk], hop-aligned ---------------------
+        // Gain rides the int16 -> f32 conversion, clamped to [-1, 1) exactly
+        // as saturating i16 arithmetic would. Matches the STT path's boost so
+        // the detector hears the same signal level the recognizer does.
+        let mut audio = Vec::with_capacity(self.mel_context.len() + frame.len());
+        for &s in self.mel_context.iter().chain(frame.iter()) {
+            audio.push((s as f32 * self.gain / 32768.0).clamp(-1.0, 0.999_969_5));
         }
-        if audio.len() < WINDOW_SAMPLES {
-            return Ok(0.0);
-        }
+        self.mel_context = frame[frame.len() - MEL_CONTEXT_SAMPLES..].to_vec();
 
-        // ---- mel: (1, samples) -> (time, 32), then x/10 + 2 -----------------
         let mel = self.run_mel(&audio)?;
         let n_mel = mel.shape()[0];
-        if n_mel < EMBEDDING_WINDOW {
-            return Ok(0.0);
+        if n_mel < MEL_FRAMES_PER_CHUNK {
+            return Ok(None);
         }
+        // Keep the LAST 8 frames: with 480 samples of context the chunk yields
+        // 9 frames whose first duplicates the previous chunk's last hop.
+        for i in (n_mel - MEL_FRAMES_PER_CHUNK)..n_mel {
+            let mut row = [0.0f32; MEL_BINS];
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell = mel[[i, j]];
+            }
+            if self.mel_frames.len() == EMBEDDING_WINDOW + MEL_FRAMES_PER_CHUNK {
+                self.mel_frames.pop_front();
+            }
+            self.mel_frames.push_back(row);
+        }
+        self.mel_since_embed += MEL_FRAMES_PER_CHUNK;
 
-        // ---- embeddings: 76-frame windows, stride 8 -------------------------
-        let mut embeddings: Vec<Vec<f32>> = Vec::new();
-        let mut start = 0;
-        while start + EMBEDDING_WINDOW <= n_mel {
-            let win = mel
-                .slice(ndarray::s![start..start + EMBEDDING_WINDOW, ..])
-                .to_owned();
-            embeddings.push(self.run_embed(&win)?);
-            start += EMBEDDING_STRIDE;
+        // ---- one embedding per 8 new mel frames --------------------------
+        if self.mel_frames.len() < EMBEDDING_WINDOW || self.mel_since_embed < EMBEDDING_STRIDE {
+            return Ok(None);
         }
-        if embeddings.len() < MIN_EMBEDDINGS {
-            return Ok(0.0);
+        self.mel_since_embed = 0;
+        let skip = self.mel_frames.len() - EMBEDDING_WINDOW;
+        let mut win = Array2::<f32>::zeros((EMBEDDING_WINDOW, MEL_BINS));
+        for (i, row) in self.mel_frames.iter().skip(skip).enumerate() {
+            for (j, &v) in row.iter().enumerate() {
+                win[[i, j]] = v;
+            }
         }
+        let emb = self.run_embed(&win)?;
+        if self.embeddings.len() == MIN_EMBEDDINGS {
+            self.embeddings.pop_front();
+        }
+        self.embeddings.push_back(emb);
 
-        // ---- classifier over the last 16 embeddings -------------------------
-        let take = &embeddings[embeddings.len() - MIN_EMBEDDINGS..];
+        // ---- classifier over the last 16 embeddings -----------------------
+        if self.embeddings.len() < MIN_EMBEDDINGS {
+            return Ok(None); // still warming up (~2 s from cold)
+        }
         let mut seq = Array3::<f32>::zeros((1, MIN_EMBEDDINGS, EMBEDDING_DIM));
-        for (i, emb) in take.iter().enumerate() {
+        for (i, emb) in self.embeddings.iter().enumerate() {
             for (j, &v) in emb.iter().enumerate() {
                 seq[[0, i, j]] = v;
             }
         }
-        self.run_classifier(seq)
+        self.run_classifier(seq).map(Some)
     }
 
     fn run_mel(&mut self, audio: &[f32]) -> Result<Array2<f32>> {
@@ -267,30 +316,18 @@ impl WakeDetector for HeySudo {
         if frame.len() != FRAME_SAMPLES {
             return None;
         }
-        // Slide the 2 s window forward by one 80 ms frame.
-        if self.window.len() == WINDOW_FRAMES {
-            self.window.pop_front();
-        }
-        self.window.push_back(frame.to_vec());
-
-        if self.window.len() < WINDOW_FRAMES {
-            return None; // not enough audio yet
-        }
         if self.cooldown > 0 {
             self.cooldown -= 1;
+            // Keep the streaming state advancing through the refractory period
+            // so post-wake audio does not arrive as a discontinuity.
+            let _ = self.step(frame);
             return None;
         }
-        // Stride: scoring every frame costs more than real time on the Pi and
-        // corrupts the capture stream (see SCORE_STRIDE_FRAMES).
-        self.frames_since_score += 1;
-        if self.frames_since_score < SCORE_STRIDE_FRAMES {
-            return None;
-        }
-        self.frames_since_score = 0;
 
         let scored_at = std::time::Instant::now();
-        match self.score_window() {
-            Ok(score) => {
+        match self.step(frame) {
+            Ok(None) => None, // warming up
+            Ok(Some(score)) => {
                 self.last_score = score;
                 // Heartbeat every ~4 s of audio: proves the detector is being fed and
                 // gives a real floor/ceiling for tuning `wake.sensitivity`.
@@ -338,12 +375,36 @@ mod tests {
 
     #[test]
     fn constants_match_the_reference_pipeline() {
-        assert_eq!(WINDOW_SAMPLES, 32_000, "2.0 s at 16 kHz");
         assert_eq!(FRAME_SAMPLES, 1_280, "80 ms at 16 kHz");
         assert_eq!(WINDOW_FRAMES, 25);
         assert_eq!(EMBEDDING_WINDOW, 76);
         assert_eq!(EMBEDDING_STRIDE, 8);
         assert_eq!(MIN_EMBEDDINGS, 16);
+        // Streaming alignment invariants: 8 mel frames per 80 ms chunk at a
+        // 160-sample hop, with 480 samples (3 hops) of left context so chunk
+        // boundaries are hop-aligned (1280 + 480 = 11 hops -> 9 frames, keep 8).
+        assert_eq!(FRAME_SAMPLES % 160, 0);
+        assert_eq!(MEL_FRAMES_PER_CHUNK, FRAME_SAMPLES / 160);
+        assert_eq!(MEL_CONTEXT_SAMPLES % 160, 0);
+        // One embedding per classifier hop: stride 8 == frames per chunk, so
+        // exactly one embedding is produced per 80 ms once warm.
+        assert_eq!(EMBEDDING_STRIDE, MEL_FRAMES_PER_CHUNK);
+    }
+
+    #[test]
+    fn gain_boosts_and_clamps_like_saturating_i16() {
+        // The conversion must saturate, not wrap: a loud frame times 8 stays at
+        // full-scale, exactly like the STT path's clamped i16 boost.
+        let g = 8.0f32;
+        let quiet = (1000_f32 * g / 32768.0).clamp(-1.0, 0.999_969_5);
+        assert!(
+            (quiet - 0.244).abs() < 0.01,
+            "quiet samples scale linearly: {quiet}"
+        );
+        let loud = (i16::MAX as f32 * g / 32768.0).clamp(-1.0, 0.999_969_5);
+        assert!(loud <= 0.999_969_5, "must clamp, not exceed full scale");
+        let neg = (i16::MIN as f32 * g / 32768.0).clamp(-1.0, 0.999_969_5);
+        assert_eq!(neg, -1.0, "negative rail clamps to -1");
     }
 
     #[test]
@@ -355,7 +416,7 @@ mod tests {
     #[test]
     fn missing_models_error_clearly() {
         // Session is not Debug, so match on the Err arm rather than unwrap_err().
-        match HeySudo::load(Some(Path::new("/nope/hey_sudo.onnx")), 0.5) {
+        match HeySudo::load(Some(Path::new("/nope/hey_sudo.onnx")), 0.5, 8.0) {
             Err(e) => assert!(
                 e.to_string().contains("not found"),
                 "error should name the missing file: {e}"

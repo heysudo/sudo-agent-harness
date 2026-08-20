@@ -316,6 +316,12 @@ pub struct Stt {
     pub sarvam_vad_threshold: f32,
     /// Software gain on mic samples before upload (XVF3800 output is quiet).
     pub sarvam_gain: f32,
+    /// Follow-up conversation window: after a spoken answer the mic re-opens
+    /// for this long, and a command spoken within it needs no second wake
+    /// word. Only a non-empty transcript arms the turn (music residue and
+    /// background chatter produce empty partials and lapse silently); music
+    /// stays ducked while the window is open. 0 disables follow-ups.
+    pub followup_window_ms: u64,
 }
 
 impl Default for Stt {
@@ -335,6 +341,7 @@ impl Default for Stt {
             sarvam_silence_ms: 500,
             sarvam_vad_threshold: 0.15,
             sarvam_gain: 8.0,
+            followup_window_ms: 3_000,
         }
     }
 }
@@ -348,6 +355,10 @@ pub struct Wake {
     /// Optional path to a custom .ppn keyword file; overrides `keyword`.
     pub keyword_path: Option<PathBuf>,
     pub sensitivity: f32,
+    /// Software gain applied to mic samples before wake scoring. The XVF3800's
+    /// beamformed output is quiet (~-35 dBFS speech); the same boost that fixed
+    /// STT (stt.sarvam_gain) is needed here or music/noise masks the phrase.
+    pub gain: f32,
 }
 
 impl Default for Wake {
@@ -357,6 +368,7 @@ impl Default for Wake {
             keyword: "computer".into(),
             keyword_path: None,
             sensitivity: 0.5,
+            gain: 8.0,
         }
     }
 }
@@ -525,6 +537,12 @@ impl Config {
             "memory.core_token_cap is hard-capped at 600 tokens"
         );
         anyhow::ensure!(
+            self.stt.followup_window_ms <= 10_000,
+            "stt.followup_window_ms of {}ms holds the mic open too long after every \
+             answer; keep the follow-up window at 10s or less (0 disables it)",
+            self.stt.followup_window_ms
+        );
+        anyhow::ensure!(
             self.audio.buffer_ms >= self.audio.period_ms,
             "audio.buffer_ms must be >= period_ms"
         );
@@ -653,6 +671,27 @@ mod tests {
         let mut cfg = Config::default();
         cfg.llm.max_tool_rounds = 5;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn followup_window_is_bounded_and_defaults_sane() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.stt.followup_window_ms, 3_000,
+            "3 s follow-up by default"
+        );
+        assert!(cfg.validate().is_ok());
+
+        // A window that long stops being a follow-up and starts being an
+        // always-open mic; the validator refuses it.
+        let mut cfg = Config::default();
+        cfg.stt.followup_window_ms = 30_000;
+        assert!(cfg.validate().is_err());
+
+        // 0 = feature off, and must stay valid.
+        let mut cfg = Config::default();
+        cfg.stt.followup_window_ms = 0;
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

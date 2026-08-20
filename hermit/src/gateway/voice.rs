@@ -165,8 +165,16 @@ pub async fn run(
             continue;
         }
 
-        // --- wake fired (or manual trigger) --------------------------------
-        let wake_at = std::time::Instant::now();
+        // --- wake fired (or manual trigger): a CONVERSATION starts ----------
+        // One wake word opens a whole exchange. After each spoken answer the
+        // mic re-opens for `followup_window_ms` so a chained command needs no
+        // second "hey sudo". The window is deliberately conservative: music
+        // stays ducked through it (less echo residue for the VAD to chew on),
+        // no ack chirp plays (nothing was triggered), and only a NON-EMPTY
+        // transcript arms a turn — background chatter and music residue that
+        // produce empty partials let the window lapse silently.
+        let mut followup: Option<Duration> = None;
+        let followup_cfg = cfg.stt.followup_window_ms;
 
         // Barge-in: kill anything currently being spoken, immediately.
         gateway.player.flush().await;
@@ -176,42 +184,64 @@ pub async fn run(
         earcons.play_trigger_ack(&gateway.player).await;
         gateway.music.duck().await;
 
-        listening.store(true, Ordering::Release);
-        tracing::info!(flush_us = wake_at.elapsed().as_micros(), "listening");
+        loop {
+            let wake_at = std::time::Instant::now();
+            listening.store(true, Ordering::Release);
+            match followup {
+                None => tracing::info!(flush_us = wake_at.elapsed().as_micros(), "listening"),
+                Some(w) => tracing::info!(window_ms = w.as_millis(), "follow-up window open"),
+            }
 
-        let gw = gateway.clone();
-        let stt = stt.clone();
-        let flag = listening.clone();
-        let ec = earcons.clone();
-        let turn_state = state.clone();
-        let turn_speaker_muted = speaker_muted.clone();
-        let turn_console_volume = console_volume.clone();
-        // 128 x 20 ms = ~2.5 s of audio, comfortably covering the Deepgram
-        // handshake so early speech is not lost while the socket opens.
-        let (utt_tx, utt_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(128);
+            let gw = gateway.clone();
+            let stt = stt.clone();
+            let flag = listening.clone();
+            let ec = earcons.clone();
+            let turn_state = state.clone();
+            // 128 x 20 ms = ~2.5 s of audio, comfortably covering the Deepgram
+            // handshake so early speech is not lost while the socket opens.
+            let (utt_tx, utt_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(128);
 
-        // The utterance task owns STT and the turn; the capture loop keeps feeding
-        // it audio until it signals completion.
-        let handle = tokio::spawn(async move {
-            let result =
-                transcribe_and_answer(gw.clone(), stt, utt_rx, wake_at, ec, turn_state).await;
-            gw.music.unduck().await;
-            flag.store(false, Ordering::Release);
-            result
-        });
+            // The utterance task owns STT and the turn; the capture loop keeps
+            // feeding it audio until it signals completion. Unducking waits for
+            // the END of the conversation, not the turn — the follow-up window
+            // listens against quiet music.
+            let handle = tokio::spawn(async move {
+                let result = transcribe_and_answer(
+                    gw.clone(),
+                    stt,
+                    utt_rx,
+                    wake_at,
+                    ec,
+                    turn_state,
+                    followup,
+                )
+                .await;
+                flag.store(false, Ordering::Release);
+                result
+            });
 
-        // Forward microphone audio to the utterance task until it finishes.
-        forward_until_done(
-            &mut mic_rx,
-            utt_tx,
-            &listening,
-            &state,
-            &gateway,
-            &turn_speaker_muted,
-            &turn_console_volume,
-        )
-        .await;
-        let _ = handle.await;
+            // Forward microphone audio to the utterance task until it finishes.
+            forward_until_done(
+                &mut mic_rx,
+                utt_tx,
+                &listening,
+                &state,
+                &gateway,
+                &speaker_muted,
+                &console_volume,
+            )
+            .await;
+            let answered = handle.await.ok().flatten();
+
+            // A spoken answer earns a follow-up window; silence or a failed
+            // turn ends the conversation.
+            if answered.is_some() && followup_cfg > 0 {
+                followup = Some(Duration::from_millis(followup_cfg));
+            } else {
+                break;
+            }
+        }
+        gateway.music.unduck().await;
     }
 
     tracing::info!("voice pipeline stopped");
@@ -302,6 +332,14 @@ async fn forward_until_done(
 }
 
 /// Stream to Deepgram, fire a speculative search, then answer.
+///
+/// `followup_window`: when `Some(d)`, this is a FOLLOW-UP turn — the wake word
+/// was not spoken; the mic stays open after the previous answer so the user
+/// can chain a command. Judicious by design: the turn only arms when STT
+/// produces a non-empty transcript within `d` (VAD blips from ducked music or
+/// distant chatter yield empty partials, which do not count), and an expired
+/// window returns quietly — no earcon, no "no speech" event, no log noise —
+/// because silence after an answer is the EXPECTED outcome, not an error.
 async fn transcribe_and_answer(
     gateway: Arc<Gateway>,
     stt: Arc<dyn SttSession>,
@@ -309,6 +347,7 @@ async fn transcribe_and_answer(
     wake_at: std::time::Instant,
     earcons: Arc<Earcons>,
     state: Arc<Mutex<crate::state_io::StateWriter>>,
+    followup_window: Option<Duration>,
 ) -> Option<String> {
     let (audio_tx, mut events) = match stt.start().await {
         Ok(x) => x,
@@ -336,7 +375,35 @@ async fn transcribe_and_answer(
     let mut prefetch: Option<crate::orchestrator::Prefetch> = None;
     let mut prefetched_for = String::new();
 
-    while let Some(ev) = events.recv().await {
+    // Follow-up turns: a hard deadline for the FIRST real transcript. Once the
+    // user is actually speaking the deadline no longer applies (the normal
+    // 8 s utterance cap takes over).
+    let quiet_deadline = followup_window.map(|d| tokio::time::Instant::now() + d);
+    let mut heard = false;
+
+    loop {
+        let next = match (quiet_deadline, heard) {
+            (Some(dl), false) => match tokio::time::timeout_at(dl, events.recv()).await {
+                Ok(ev) => ev,
+                Err(_) => {
+                    // Window expired in silence: the expected outcome. Close
+                    // the mic quietly and hand control back to the wake word.
+                    pump.abort();
+                    let _ = pump.await;
+                    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                    state.write_live(serde_json::json!({
+                        "transcript_interim": "", "listening": false,
+                    }));
+                    state.emit("followup_expired", serde_json::json!({}));
+                    if let Some(p) = prefetch {
+                        p.handle.abort();
+                    }
+                    return None;
+                }
+            },
+            _ => events.recv().await,
+        };
+        let Some(ev) = next else { break };
         match &ev {
             SttEvent::Language(lang) => {
                 builder.apply(&ev);
@@ -345,6 +412,11 @@ async fn transcribe_and_answer(
             SttEvent::Interim(_) | SttEvent::Final(_) => {
                 builder.apply(&ev);
                 let provisional = builder.provisional();
+                // Real words arm the turn; empty partials (VAD blips from music
+                // residue or far-away chatter) do not stop the quiet deadline.
+                if !heard && !provisional.trim().is_empty() {
+                    heard = true;
+                }
                 state
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())

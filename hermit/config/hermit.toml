@@ -107,6 +107,11 @@ sarvam_stream_type = "fast"     # lowest-latency partials for conversational voi
 sarvam_silence_ms = 500         # server VAD pause before finalizing
 sarvam_vad_threshold = 0.15     # default 0.3 misses the XVF3800's quiet output
 sarvam_gain = 8.0               # software boost: ~-35 dBFS speech -> ~-17 dBFS
+# One wake word starts a conversation: after each spoken answer the mic
+# re-opens for this window and a follow-up command needs no "hey sudo".
+# Judicious: only a non-empty transcript arms a turn (music residue and
+# room chatter lapse silently), music stays ducked during the window.
+followup_window_ms = 3000       # 0 disables follow-up conversations
 max_utterance_ms = 8000
 
 # --- Deepgram (fallback; set provider = "deepgram" to switch back) ---
@@ -126,6 +131,11 @@ keyword = "computer"     # Porcupine fallback only
 # 0.5 is the livekit-wakeword / openWakeWord reference default. Lower = more
 # sensitive and more false accepts. Tune with: hermit wake-score <recording.wav>
 sensitivity = 0.5
+# Software gain on mic samples before scoring. The XVF3800's voice channel is
+# ~-35 dBFS for normal speech; the model was trained on normal-level audio, so
+# ungained live phrases score far below their offline scores — especially with
+# music playing, where AEC residual buries the quiet voice. Same 8x as stt.
+gain = 8.0
 
 [audio]
 playback_pcm = "hermit_out"   # defined in /etc/asound.conf
