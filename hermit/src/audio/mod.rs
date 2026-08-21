@@ -23,7 +23,7 @@ mod null_sink;
 
 use anyhow::Result;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// Messages to the playback thread.
 pub enum AudioMsg {
@@ -60,6 +60,11 @@ pub struct AudioPlayer {
     /// than skipping writes: the XVF3800's capture clock is slaved to playback, so
     /// a mute that stopped the stream would also deafen the microphone.
     muted: Arc<std::sync::atomic::AtomicBool>,
+    /// Speech volume percent (0-100). Written by the volume authority
+    /// (MusicController::set_volume) so "volume 20" applies to the device's
+    /// own voice, not just music. Read by the audio thread at write time, so
+    /// a change lands mid-sentence rather than on the next utterance.
+    volume: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl AudioPlayer {
@@ -145,6 +150,8 @@ impl AudioPlayer {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AudioMsg>(64);
         let generation = Arc::new(AtomicU64::new(0));
         let gen_for_thread = generation.clone();
+        let volume = Arc::new(AtomicU8::new(100));
+        let volume_for_thread = volume.clone();
 
         std::thread::Builder::new()
             .name("audio-out".into())
@@ -195,11 +202,21 @@ impl AudioPlayer {
                     match msg {
                         AudioMsg::Pcm {
                             generation,
-                            samples,
+                            mut samples,
                         } => {
                             // Stale audio from before a barge-in: drop it silently.
                             if generation < gen_for_thread.load(Ordering::Acquire) {
                                 continue;
+                            }
+                            // Speech volume: perceptual (squared) scaling, applied at
+                            // write time so "volume down" lands mid-sentence. 100 is
+                            // the no-op fast path.
+                            let vol = volume_for_thread.load(Ordering::Acquire);
+                            if vol < 100 {
+                                let g = (vol as f32 / 100.0).powi(2);
+                                for s in samples.iter_mut() {
+                                    *s = (*s as f32 * g) as i16;
+                                }
                             }
                             if let Err(e) = backend.write(&samples) {
                                 tracing::warn!(error = %e, "audio write failed");
@@ -232,10 +249,29 @@ impl AudioPlayer {
             generation,
             sample_rate,
             muted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            volume,
         })
     }
 
     /// Speaker mute. Audio keeps flowing as silence so capture stays clocked.
+    /// Set speech volume (0-100). Applied to every subsequent PCM write,
+    /// including audio already queued — mid-sentence changes take effect
+    /// within one ALSA period.
+    pub fn set_volume(&self, percent: u8) {
+        self.volume.store(percent.min(100), Ordering::Release);
+    }
+
+    pub fn volume(&self) -> u8 {
+        self.volume.load(Ordering::Acquire)
+    }
+
+    /// Share the speech-volume cell with the volume authority (MusicController),
+    /// so one "set volume" writes music and speech together without the modules
+    /// referencing each other.
+    pub fn volume_handle(&self) -> Arc<AtomicU8> {
+        self.volume.clone()
+    }
+
     pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::Release);
     }
@@ -571,6 +607,35 @@ mod tests {
             "keepalive must be silence, not noise"
         );
         p.stop().await;
+    }
+
+    #[tokio::test]
+    async fn set_volume_scales_speech_samples_not_just_music() {
+        // "Volume 20" must quiet the device's own voice, not only mpv/Spotify.
+        // Regression guard for the report: "TUI volume only worked for music."
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let discards = Arc::new(AtomicU64::new(0));
+        let p = AudioPlayer::spawn_keepalive(
+            Box::new(RecordingBackend {
+                written: written.clone(),
+                discards,
+            }),
+            16_000,
+            0, // no keepalive: only our samples land in `written`
+        )
+        .unwrap();
+
+        p.set_volume(20); // perceptual: (0.2)^2 = 0.04 linear gain
+        assert!(p.play(vec![10_000i16; 64]).await);
+        // Drain round-trips through the audio thread, so the PCM write happened.
+        let _ = p.drain().await;
+        let w = written.lock().unwrap();
+        assert!(!w.is_empty(), "samples must reach the backend");
+        assert!(
+            w.iter().all(|&s| s == 400),
+            "10000 * 0.04 = 400; got {:?}",
+            &w[..4.min(w.len())]
+        );
     }
 
     #[tokio::test]

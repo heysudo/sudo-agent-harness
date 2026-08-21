@@ -68,6 +68,9 @@ impl Gateway {
         acks: Arc<AckBank>,
         reflect_tx: tokio::sync::mpsc::Sender<ReflectSignal>,
     ) -> Self {
+        // One volume, one speaker: the music controller owns "volume" and
+        // pushes it into the speech path through this shared cell.
+        music.attach_speech_volume(player.volume_handle());
         Self {
             cfg_rx,
             orch,

@@ -45,6 +45,9 @@ pub struct MusicController {
     state: RwLock<State>,
     /// Serializes state transitions with their asynchronous backend volume write.
     volume_transition: tokio::sync::Mutex<()>,
+    /// Speech-volume cell shared with AudioPlayer (set via attach_speech_volume).
+    /// "Volume" means the whole speaker — TTS included — not just music.
+    speech_volume: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicU8>>,
     duck_db: f32,
 }
 
@@ -74,6 +77,7 @@ impl MusicController {
                 now_playing: None,
             }),
             volume_transition: tokio::sync::Mutex::new(()),
+            speech_volume: std::sync::OnceLock::new(),
             duck_db,
         }
     }
@@ -390,6 +394,23 @@ impl MusicController {
         }
     }
 
+    /// Wire the shared speech-volume cell (AudioPlayer::volume_handle). Called
+    /// once at gateway construction; also seeds speech to the current nominal
+    /// volume so boot state is consistent.
+    pub fn attach_speech_volume(&self, cell: std::sync::Arc<std::sync::atomic::AtomicU8>) {
+        cell.store(
+            self.state.try_read().map(|st| st.volume).unwrap_or(100),
+            std::sync::atomic::Ordering::Release,
+        );
+        let _ = self.speech_volume.set(cell);
+    }
+
+    fn apply_speech_volume(&self, v: u8) {
+        if let Some(cell) = self.speech_volume.get() {
+            cell.store(v.min(100), std::sync::atomic::Ordering::Release);
+        }
+    }
+
     /// Set nominal volume and apply it to the active backend.
     pub async fn set_volume(&self, percent: u8) -> Result<()> {
         let _transition = self.volume_transition.lock().await;
@@ -399,6 +420,9 @@ impl MusicController {
             st.volume = v;
             self.effective_volume(&st)
         };
+        // Speech tracks the nominal volume (never the ducked value: ducking
+        // exists to make room FOR speech).
+        self.apply_speech_volume(v);
         self.apply_volume(target).await
     }
 
