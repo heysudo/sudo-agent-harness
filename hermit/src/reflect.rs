@@ -217,9 +217,71 @@ impl ReflectionWorker {
         Ok(())
     }
 
+    /// Fold the feedback ledger into memory: denials with corrections become
+    /// correction facts (via the same LLM extraction firewall as everything
+    /// else), so recall can steer future turns. The ledger is append-only
+    /// and small (one line per ask); extraction is idempotent because the
+    /// memory dedupe layer absorbs repeated facts.
+    pub async fn consolidate_feedback(&self, cfg: &Config) -> Result<()> {
+        let store = crate::feedback::FeedbackStore::open(&cfg.paths.data_dir)?;
+        let entries = store.entries();
+        let denials: Vec<_> = entries
+            .iter()
+            .filter(|e| e.verdict == "no" && e.correction.is_some())
+            .collect();
+        if denials.is_empty() {
+            return Ok(());
+        }
+        let listing = denials
+            .iter()
+            .map(|e| {
+                format!(
+                    "- user asked: {:?}; device did: {:?}; user corrected to: {:?}",
+                    e.utterance,
+                    e.answer_head,
+                    e.correction.as_deref().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let req = ChatRequest {
+            messages: vec![
+                ChatMessage::system(
+                    "These are voice-assistant turns the user marked WRONG, with their \
+                     corrections. Extract durable preference/disambiguation facts that would \
+                     prevent the same mistake (e.g. 'Akashvani Katak means the Cuttack radio \
+                     station'). Output STRICT JSON: {\"facts\":[{\"text\":...,\"tags\":[...],\
+                     \"importance\":0.0-1.0}],\"importance_updates\":[],\"retire\":[]}. \
+                     Only include facts that generalize; skip one-off mishearings.",
+                ),
+                ChatMessage::user(crate::tools::clip(&listing, 6000)),
+            ],
+            tools: vec![],
+            effort: Effort::Low,
+            max_tokens: 500,
+            temperature: 0.2,
+        };
+        let raw = self.llm.complete(req).await?;
+        let batch = parse_extraction(&raw)?;
+        let n = batch.facts().len();
+        self.store.apply_reflection(&batch, 0.62)?;
+        tracing::info!(
+            denials = denials.len(),
+            facts = n,
+            "feedback consolidated into memory"
+        );
+        Ok(())
+    }
+
     /// Nightly: summarize sessions, rewrite core.md, decay, prune, vacuum.
     pub async fn consolidate(&self, cfg: &Config) -> Result<()> {
         tracing::info!("consolidation starting");
+
+        // 0. Feedback ledger -> correction facts (own failure domain: a bad
+        // ledger or LLM hiccup must not block session summaries).
+        if let Err(e) = self.consolidate_feedback(cfg).await {
+            tracing::warn!(error = %e, "feedback consolidation failed");
+        }
 
         // 1. Summarize any finished sessions.
         for (session_id, _started) in self.store.unsummarized_sessions(20) {

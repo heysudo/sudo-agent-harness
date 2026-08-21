@@ -44,6 +44,9 @@ pub trait WakeDetector: Send {
     fn last_score(&self) -> Option<(f32, f32)> {
         None
     }
+    /// Adjust the firing threshold at runtime (feedback tuning). Engines with
+    /// no tunable threshold ignore it.
+    fn set_threshold(&mut self, _threshold: f32) {}
 }
 
 /// Boxed detectors are detectors too — `build()` returns a trait object and the
@@ -57,6 +60,9 @@ impl WakeDetector for Box<dyn WakeDetector> {
     }
     fn last_score(&self) -> Option<(f32, f32)> {
         (**self).last_score()
+    }
+    fn set_threshold(&mut self, threshold: f32) {
+        (**self).set_threshold(threshold)
     }
 }
 
@@ -91,9 +97,16 @@ impl WakeDetector for NullWake {
 /// ALSA hands us periods that have nothing to do with Porcupine's 512-sample frame,
 /// so this buffers the remainder across reads. Getting this wrong is the classic
 /// way to end up with a wake word that only fires occasionally.
+/// 2.5 s at 16 kHz.
+const RECENT_SAMPLES: usize = 40_000;
+
 pub struct FrameFeeder<D: WakeDetector> {
     detector: D,
     buffer: Vec<i16>,
+    /// Rolling copy of the last ~2.5 s of raw mic audio. When the wake word
+    /// fires, this IS the evidence - persisted (on user confirmation) as a
+    /// labeled clip for the Indic retrain dataset.
+    recent: std::collections::VecDeque<i16>,
 }
 
 impl<D: WakeDetector> FrameFeeder<D> {
@@ -102,11 +115,18 @@ impl<D: WakeDetector> FrameFeeder<D> {
         Self {
             detector,
             buffer: Vec::with_capacity(cap),
+            recent: std::collections::VecDeque::with_capacity(RECENT_SAMPLES),
         }
     }
 
     /// Push arbitrary-length audio; returns the keyword index if one fires.
     pub fn push(&mut self, samples: &[i16]) -> Option<usize> {
+        for &s in samples {
+            if self.recent.len() == RECENT_SAMPLES {
+                self.recent.pop_front();
+            }
+            self.recent.push_back(s);
+        }
         self.buffer.extend_from_slice(samples);
         let n = self.detector.frame_length();
         if n == 0 {
@@ -141,6 +161,18 @@ impl<D: WakeDetector> FrameFeeder<D> {
     /// Telemetry passthrough to the wrapped detector.
     pub fn last_score(&self) -> Option<(f32, f32)> {
         self.detector.last_score()
+    }
+
+    /// Runtime threshold override (feedback tuning).
+    pub fn set_threshold(&mut self, threshold: f32) {
+        self.detector.set_threshold(threshold);
+    }
+
+    /// The last ~2.5 s of raw audio - the window that contains the wake word
+    /// when called right after a detection. Copied out so the feeder can keep
+    /// rolling while the caller persists it.
+    pub fn recent_audio(&self) -> Vec<i16> {
+        self.recent.iter().copied().collect()
     }
 }
 

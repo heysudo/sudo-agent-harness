@@ -312,6 +312,12 @@ impl WakeDetector for HeySudo {
         Some((self.last_score, self.threshold))
     }
 
+    fn set_threshold(&mut self, threshold: f32) {
+        if (0.05..=0.95).contains(&threshold) {
+            self.threshold = threshold;
+        }
+    }
+
     fn process(&mut self, frame: &[i16]) -> Option<usize> {
         if frame.len() != FRAME_SAMPLES {
             return None;

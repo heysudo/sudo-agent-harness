@@ -24,6 +24,7 @@ pub struct Config {
     pub tts: Tts,
     pub stt: Stt,
     pub wake: Wake,
+    pub feedback: Feedback,
     pub audio: Audio,
     pub memory: Memory,
     pub reflect: Reflect,
@@ -284,6 +285,40 @@ impl Default for Tts {
     }
 }
 
+/// The turn-feedback loop: after an answer, sometimes ask "did I get that
+/// right?", listen briefly, and learn from the reply. `ask_probability`
+/// decays as confirmation rate rises (handled in tuning state, not here).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Feedback {
+    /// Master switch for the ask-confirm-learn loop.
+    pub enabled: bool,
+    /// Seconds of the answer/music the user hears before the ask. 0 = ask
+    /// immediately after speech completes.
+    pub settle_secs: u64,
+    /// How long the yes/no listen window stays open (ms).
+    pub listen_ms: u64,
+    /// Starting probability of asking after an eligible turn (0..1).
+    pub ask_probability: f64,
+    /// Hard floor/ceiling the tuner may move ask_probability within.
+    pub min_ask_probability: f64,
+    /// Wake clips: keep at most this many confirmed/denied clips on disk.
+    pub max_clips: u64,
+}
+
+impl Default for Feedback {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            settle_secs: 20,
+            listen_ms: 6000,
+            ask_probability: 1.0,
+            min_ask_probability: 0.15,
+            max_clips: 400,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Stt {
@@ -535,6 +570,20 @@ impl Config {
         anyhow::ensure!(
             self.memory.core_token_cap <= 600,
             "memory.core_token_cap is hard-capped at 600 tokens"
+        );
+        anyhow::ensure!(
+            self.feedback.settle_secs <= 60,
+            "feedback.settle_secs is capped at 60 - the ask must arrive while the turn is still fresh"
+        );
+        anyhow::ensure!(
+            self.feedback.listen_ms >= 2_000 && self.feedback.listen_ms <= 15_000,
+            "feedback.listen_ms must be within 2000..=15000"
+        );
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&self.feedback.ask_probability)
+                && (0.0..=1.0).contains(&self.feedback.min_ask_probability)
+                && self.feedback.min_ask_probability <= self.feedback.ask_probability,
+            "feedback probabilities must be in 0..=1 with min <= start"
         );
         anyhow::ensure!(
             self.stt.followup_window_ms <= 10_000,

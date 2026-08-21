@@ -1,5 +1,6 @@
 pub mod audio;
 pub mod config;
+pub mod feedback;
 pub mod gateway;
 pub mod http;
 pub mod llm;

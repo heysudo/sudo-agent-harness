@@ -89,6 +89,28 @@ pub async fn run(
     };
 
     let mut feeder = FrameFeeder::new(detector);
+    // Feedback loop state. The learned wake threshold outlives restarts and
+    // overrides wake.sensitivity when the loop has learned one.
+    let fb_store = match crate::feedback::FeedbackStore::open(&cfg.paths.data_dir) {
+        Ok(s) => Some(Arc::new(s)),
+        Err(e) => {
+            tracing::warn!(error = %e, "feedback store unavailable; loop disabled");
+            None
+        }
+    };
+    let mut tuning = fb_store
+        .as_ref()
+        .map(|s| s.load_tuning(&cfg))
+        .unwrap_or_else(|| crate::feedback::Tuning::bootstrap(&cfg));
+    if (tuning.wake_threshold - cfg.wake.sensitivity).abs() > f32::EPSILON {
+        tracing::info!(
+            learned = tuning.wake_threshold,
+            configured = cfg.wake.sensitivity,
+            "applying learned wake threshold"
+        );
+    }
+    feeder.set_threshold(tuning.wake_threshold);
+    let mut rng_state: u64 = 0x9E3779B97F4A7C15;
     let listening = Arc::new(AtomicBool::new(false));
     let speaker_muted = Arc::new(AtomicBool::new(false));
     // Last console-applied volume; u16 so u8::MAX+1 can mean "none applied yet".
@@ -99,6 +121,9 @@ pub async fn run(
     let earcons = Arc::new(Earcons::load());
 
     tracing::info!("voice pipeline ready; waiting for the wake word");
+
+    // (score, raw 2.5s audio) captured at the moment the wake word fired.
+    let mut wake_evidence: Option<(f32, Vec<i16>)> = None;
 
     loop {
         // Either the wake word fires, or something triggers a turn manually.
@@ -138,9 +163,12 @@ pub async fn run(
                         "volume": vol,
                     }));
                     if hit {
-                        feeder.reset();
                         state_guard.emit("ww_fired", serde_json::json!({"score": score}));
                         tracing::info!("wake word detected");
+                        // Evidence for the feedback loop: the raw window that
+                        // fired, BEFORE reset clears it.
+                        wake_evidence = Some((score, feeder.recent_audio()));
+                        feeder.reset();
                     }
                     hit
                 }
@@ -155,6 +183,7 @@ pub async fn run(
                     state.lock().unwrap_or_else(|e| e.into_inner())
                         .emit("manual_trigger", serde_json::json!({}));
                     feeder.reset();
+                    wake_evidence = None; // no wake word to learn from
                     true
                 }
                 // Sender dropped: no more manual triggers, but the wake word still works.
@@ -193,7 +222,7 @@ pub async fn run(
             }
 
             let gw = gateway.clone();
-            let stt = stt.clone();
+            let stt_task = stt.clone();
             let flag = listening.clone();
             let ec = earcons.clone();
             let turn_state = state.clone();
@@ -208,7 +237,7 @@ pub async fn run(
             let handle = tokio::spawn(async move {
                 let result = transcribe_and_answer(
                     gw.clone(),
-                    stt,
+                    stt_task,
                     utt_rx,
                     wake_at,
                     ec,
@@ -232,6 +261,115 @@ pub async fn run(
             )
             .await;
             let answered = handle.await.ok().flatten();
+
+            // --- feedback ask: "did I get that right?" -----------------------
+            // Runs on the FIRST completed turn of a conversation (the one the
+            // wake word opened), sometimes, per the learned ask rate. The
+            // answer/music plays for `settle_secs` first so the user judges
+            // the actual outcome, then the device asks and listens briefly.
+            // A "no" invites a restated command, which becomes the next turn
+            // of this same conversation (music stays ducked throughout).
+            let mut corrected_turn: Option<String> = None;
+            if let (Some(outcome), Some(store), None) = (&answered, &fb_store, &followup) {
+                let fb_cfg = &cfg.feedback;
+                // xorshift - deterministic-free coin flip against ask_probability.
+                rng_state ^= rng_state << 13;
+                rng_state ^= rng_state >> 7;
+                rng_state ^= rng_state << 17;
+                let coin = (rng_state >> 11) as f64 / (1u64 << 53) as f64;
+                if fb_cfg.enabled && outcome.speech_completed && coin < tuning.ask_probability {
+                    let (verdict, correction) = ask_and_listen(
+                        &gateway,
+                        &stt,
+                        &mut mic_rx,
+                        &listening,
+                        &state,
+                        &speaker_muted,
+                        &console_volume,
+                        outcome,
+                        fb_cfg,
+                    )
+                    .await;
+
+                    let (score, clip) = match wake_evidence.take() {
+                        Some((sc, audio)) => (sc, Some(audio)),
+                        None => (0.0, None),
+                    };
+                    // Persist the wake clip for retraining, labeled by verdict.
+                    let clip_name = clip.and_then(|audio| {
+                        let label = match verdict {
+                            crate::feedback::Verdict::Yes => "pos",
+                            crate::feedback::Verdict::No => "neg",
+                            crate::feedback::Verdict::Unclear => return None,
+                        };
+                        let name =
+                            format!("{}_{}_{:.2}.wav", crate::feedback::now_ts(), label, score);
+                        let path = store.clips_dir().join(&name);
+                        match crate::speech::write_wav_16k(&path, &audio) {
+                            Ok(()) => Some(name),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "wake clip write failed");
+                                None
+                            }
+                        }
+                    });
+                    store.prune_clips(fb_cfg.max_clips);
+
+                    crate::feedback::apply_verdict(
+                        &mut tuning,
+                        verdict,
+                        score,
+                        fb_cfg.min_ask_probability,
+                    );
+                    feeder.set_threshold(tuning.wake_threshold);
+                    if let Err(e) = store.save_tuning(&tuning) {
+                        tracing::warn!(error = %e, "tuning save failed");
+                    }
+                    let entry = crate::feedback::Entry {
+                        ts: crate::feedback::now_ts(),
+                        utterance: outcome.utterance.clone(),
+                        answer_head: outcome.answer.chars().take(120).collect(),
+                        verdict: format!("{verdict:?}").to_lowercase(),
+                        wake_score: score,
+                        wake_threshold: tuning.wake_threshold,
+                        clip: clip_name,
+                        correction: correction.clone(),
+                        language: outcome.language.clone(),
+                    };
+                    if let Err(e) = store.append(&entry) {
+                        tracing::warn!(error = %e, "feedback ledger append failed");
+                    }
+                    state.lock().unwrap_or_else(|e| e.into_inner()).emit(
+                        "feedback",
+                        serde_json::json!({
+                            "verdict": entry.verdict,
+                            "ask_probability": tuning.ask_probability,
+                            "wake_threshold": tuning.wake_threshold,
+                        }),
+                    );
+                    tracing::info!(
+                        verdict = %entry.verdict,
+                        wake_threshold = tuning.wake_threshold,
+                        ask_probability = tuning.ask_probability,
+                        "feedback recorded"
+                    );
+                    corrected_turn = correction;
+                }
+            }
+            wake_evidence = None;
+
+            // A denial's restated command IS the next turn - loop immediately
+            // with no wake word and no follow-up deadline pressure.
+            if let Some(text) = corrected_turn {
+                // The correction was already captured as finished text; answer it
+                // directly rather than re-listening.
+                let outcome = answer_text_turn(&gateway, &state, &text).await;
+                if outcome.is_some() && followup_cfg > 0 {
+                    followup = Some(Duration::from_millis(followup_cfg));
+                    continue;
+                }
+                break;
+            }
 
             // A spoken answer earns a follow-up window; silence or a failed
             // turn ends the conversation.
@@ -331,6 +469,15 @@ async fn forward_until_done(
     drop(utt_tx); // signals end-of-audio to Deepgram
 }
 
+/// What a completed spoken turn hands back to the conversation loop - enough
+/// for the feedback loop to ask about it and log the exchange.
+pub struct TurnOutcome {
+    pub utterance: String,
+    pub answer: String,
+    pub language: Option<String>,
+    pub speech_completed: bool,
+}
+
 /// Stream to Deepgram, fire a speculative search, then answer.
 ///
 /// `followup_window`: when `Some(d)`, this is a FOLLOW-UP turn — the wake word
@@ -348,7 +495,7 @@ async fn transcribe_and_answer(
     earcons: Arc<Earcons>,
     state: Arc<Mutex<crate::state_io::StateWriter>>,
     followup_window: Option<Duration>,
-) -> Option<String> {
+) -> Option<TurnOutcome> {
     let (audio_tx, mut events) = match stt.start().await {
         Ok(x) => x,
         Err(e) => {
@@ -522,7 +669,7 @@ async fn transcribe_and_answer(
         .map(String::from);
 
     match gateway
-        .handle_in_language(&utterance, true, None, prefetch, reply_lang)
+        .handle_in_language(&utterance, true, None, prefetch, reply_lang.clone())
         .await
     {
         Ok(r) => {
@@ -550,7 +697,12 @@ async fn transcribe_and_answer(
                     }),
                 );
             }
-            Some(r.answer)
+            Some(TurnOutcome {
+                utterance: utterance.clone(),
+                answer: r.answer.clone(),
+                language: reply_lang,
+                speech_completed: r.speech_completed,
+            })
         }
         Err(e) => {
             state
@@ -561,6 +713,247 @@ async fn transcribe_and_answer(
                     serde_json::json!({"utterance": utterance, "error": e.to_string()}),
                 );
             tracing::error!(error = ?e, "voice turn failed");
+            None
+        }
+    }
+}
+
+/// Speak "did I get that right?", listen briefly, classify. On a No, ask the
+/// user to restate and capture that too. Music stays ducked (the conversation
+/// is still open); the answer/music gets `settle_secs` to breathe first so
+/// the user judges the real outcome - for a music request that IS the music.
+#[allow(clippy::too_many_arguments)]
+async fn ask_and_listen(
+    gateway: &Arc<Gateway>,
+    stt: &Arc<dyn SttSession>,
+    mic_rx: &mut MicRx,
+    listening: &Arc<AtomicBool>,
+    state: &Arc<Mutex<crate::state_io::StateWriter>>,
+    speaker_muted: &Arc<AtomicBool>,
+    console_volume: &Arc<AtomicU16>,
+    outcome: &TurnOutcome,
+    fb: &crate::config::Feedback,
+) -> (crate::feedback::Verdict, Option<String>) {
+    // Let the outcome play. Music requests: unduck for the settle window so
+    // the user hears the actual song, then duck again to ask over it. Mic
+    // frames are drained (dropped) through the settle so the ask's listen
+    // window doesn't start on stale audio; the wake word is deliberately
+    // paused for these few seconds - same trade Alexa makes during its own
+    // confirmation prompts.
+    let settled_music = gateway.music.source().await != crate::music::Source::None;
+    if fb.settle_secs > 0 {
+        if settled_music {
+            gateway.music.unduck().await;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(fb.settle_secs);
+        while (tokio::time::timeout_at(deadline, mic_rx.recv()).await).is_ok_and(|f| f.is_some()) {}
+        if settled_music {
+            gateway.music.duck().await;
+        }
+    }
+
+    let lang = outcome.language.as_deref();
+    if !gateway
+        .speak_once_in(crate::feedback::ask_phrase(lang), lang)
+        .await
+    {
+        // No voice, no ask - do not count silence against the user.
+        return (crate::feedback::Verdict::Unclear, None);
+    }
+
+    let reply = capture_reply(
+        gateway,
+        stt,
+        mic_rx,
+        listening,
+        state,
+        speaker_muted,
+        console_volume,
+        fb.listen_ms,
+    )
+    .await;
+    let verdict = match &reply {
+        Some(text) => crate::feedback::classify(text),
+        None => crate::feedback::Verdict::Unclear,
+    };
+    state.lock().unwrap_or_else(|e| e.into_inner()).emit(
+        "feedback_reply",
+        serde_json::json!({"reply": reply.clone().unwrap_or_default(), "verdict": format!("{verdict:?}")}),
+    );
+
+    if verdict != crate::feedback::Verdict::No {
+        return (verdict, None);
+    }
+
+    // Denied: stop the wrong outcome (a wrong song should not keep playing
+    // under the apology) and invite a restatement.
+    if settled_music {
+        let _ = gateway.music.stop().await;
+    }
+    let _ = gateway
+        .speak_once_in(crate::feedback::retry_phrase(lang), lang)
+        .await;
+    let correction = capture_reply(
+        gateway,
+        stt,
+        mic_rx,
+        listening,
+        state,
+        speaker_muted,
+        console_volume,
+        // Restating a whole command needs more room than yes/no.
+        fb.listen_ms.max(8_000),
+    )
+    .await
+    .filter(|t| !t.trim().is_empty());
+    (crate::feedback::Verdict::No, correction)
+}
+
+/// Open a short STT window and return the best utterance, if any. The same
+/// judicious rules as the follow-up window: only real words count, expiry is
+/// silent, the mic closes the moment speech ends.
+#[allow(clippy::too_many_arguments)]
+async fn capture_reply(
+    gateway: &Arc<Gateway>,
+    stt: &Arc<dyn SttSession>,
+    mic_rx: &mut MicRx,
+    listening: &Arc<AtomicBool>,
+    state: &Arc<Mutex<crate::state_io::StateWriter>>,
+    speaker_muted: &Arc<AtomicBool>,
+    console_volume: &Arc<AtomicU16>,
+    window_ms: u64,
+) -> Option<String> {
+    let wake_at = std::time::Instant::now();
+    listening.store(true, Ordering::Release);
+    let (utt_tx, utt_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(128);
+
+    let gw = gateway.clone();
+    let stt2 = stt.clone();
+    let flag = listening.clone();
+    let st = state.clone();
+    let handle = tokio::spawn(async move {
+        let out = capture_transcript(gw, stt2, utt_rx, wake_at, st, window_ms).await;
+        flag.store(false, Ordering::Release);
+        out
+    });
+
+    forward_until_done(
+        mic_rx,
+        utt_tx,
+        listening,
+        state,
+        gateway,
+        speaker_muted,
+        console_volume,
+    )
+    .await;
+    handle.await.ok().flatten()
+}
+
+/// STT-only transcription: no prefetch, no LLM, no earcons - just words.
+async fn capture_transcript(
+    _gateway: Arc<Gateway>,
+    stt: Arc<dyn SttSession>,
+    mut mic_rx: MicRx,
+    _started: std::time::Instant,
+    state: Arc<Mutex<crate::state_io::StateWriter>>,
+    window_ms: u64,
+) -> Option<String> {
+    let (audio_tx, mut events) = match stt.start().await {
+        Ok(x) => x,
+        Err(e) => {
+            tracing::warn!(error = %e, "feedback stt open failed");
+            return None;
+        }
+    };
+    let pump = tokio::spawn(async move {
+        while let Some(samples) = mic_rx.recv().await {
+            if audio_tx.send(samples).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut builder = TranscriptBuilder::default();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(window_ms);
+    let mut heard = false;
+    loop {
+        let next = if heard {
+            events.recv().await
+        } else {
+            match tokio::time::timeout_at(deadline, events.recv()).await {
+                Ok(ev) => ev,
+                Err(_) => break, // silence: expected, not an error
+            }
+        };
+        let Some(ev) = next else { break };
+        match &ev {
+            SttEvent::Interim(_) | SttEvent::Final(_) => {
+                builder.apply(&ev);
+                if !heard && !builder.provisional().trim().is_empty() {
+                    heard = true;
+                }
+            }
+            SttEvent::Language(_) => builder.apply(&ev),
+            SttEvent::EndOfSpeech(_) => {
+                builder.apply(&ev);
+                let dl = tokio::time::Instant::now() + Duration::from_millis(600);
+                while let Ok(Some(late)) = tokio::time::timeout_at(dl, events.recv()).await {
+                    let is_final = matches!(late, SttEvent::Final(_));
+                    builder.apply(&late);
+                    if is_final {
+                        break;
+                    }
+                }
+                break;
+            }
+            SttEvent::Closed(_) => break,
+        }
+    }
+    pump.abort();
+    let _ = pump.await;
+    state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .write_live(serde_json::json!({"transcript_interim": "", "listening": false}));
+    let text = builder.best_utterance();
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Answer an already-transcribed command (a feedback correction) as a normal
+/// spoken turn.
+async fn answer_text_turn(
+    gateway: &Arc<Gateway>,
+    state: &Arc<Mutex<crate::state_io::StateWriter>>,
+    text: &str,
+) -> Option<String> {
+    {
+        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        st.write_live(serde_json::json!({"last_user": text}));
+        st.emit(
+            "transcript",
+            serde_json::json!({"role": "user", "text": text}),
+        );
+    }
+    match gateway
+        .handle_in_language(text, true, None, None, None)
+        .await
+    {
+        Ok(r) => {
+            let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+            st.write_live(serde_json::json!({"last_answer": r.answer}));
+            st.emit(
+                "transcript",
+                serde_json::json!({"role": "assistant", "text": r.answer}),
+            );
+            st.emit(
+                "turn_complete",
+                serde_json::json!({"utterance": text, "answer": r.answer, "correction": true}),
+            );
+            Some(r.answer)
+        }
+        Err(e) => {
+            tracing::error!(error = ?e, "correction turn failed");
             None
         }
     }

@@ -97,12 +97,15 @@ src/
   memory/          SQLite + FTS5, prompt assembly, the write firewall
   reflect.rs       nudges, skill distillation, nightly consolidation
   speech/          chunker, TTS, STT, wake word, canned acks
+  feedback.rs      the self-refining loop: verdicts, bounded tuning, wake clips
   audio/           ring buffer + ALSA, with instant barge-in flush
   music/           mpv IPC + Spotify Web API
   gateway/         CLI, WebSocket, voice pipeline
 config/            hermit.toml, prompts/*.md, skills/, stations.toml
 deploy/            provision.sh, asound.conf, systemd units, Cross.toml
 docs/BRINGUP.md    Phase 0 hardware checklist
+docs/XVF3800.md    mic-array control plane: what we tune and why
+tools/xvf3800/     xvf.py USB control tool + setup.sh (udev, AGC tuning)
 scripts/           bench.sh, flash_notes.md
 ```
 
