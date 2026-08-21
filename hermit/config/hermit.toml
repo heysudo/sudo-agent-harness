@@ -130,12 +130,28 @@ keyword = "computer"     # Porcupine fallback only
 # For hey-sudo this is the DETECTION THRESHOLD (0..1), not a Porcupine sensitivity.
 # 0.5 is the livekit-wakeword / openWakeWord reference default. Lower = more
 # sensitive and more false accepts. Tune with: hermit wake-score <recording.wav>
-sensitivity = 0.5
-# Software gain on mic samples before scoring. The XVF3800's voice channel is
-# ~-35 dBFS for normal speech; the model was trained on normal-level audio, so
-# ungained live phrases score far below their offline scores — especially with
-# music playing, where AEC residual buries the quiet voice. Same 8x as stt.
-gain = 8.0
+# Reference device runs 0.38 after live A/B at 2 m (0.5 missed normal-voice
+# wakes; scores landed 0.26-0.45). The feedback loop's learned threshold in
+# <data_dir>/feedback/tuning.json overrides this at boot once it exists.
+sensitivity = 0.38
+# Software gain on mic samples before scoring. 1.0 assumes the XVF3800 AGC
+# tuning from tools/xvf3800/setup.sh (on-chip gain, applied ahead of the noise
+# suppressor - better SNR than multiplying here). On a stock board set 8.0.
+gain = 1.0
+
+[feedback]
+# The self-refining loop: after an answer, sometimes ask "did I get that
+# right?", listen ~6s, and learn. Yes/no/silence all teach it something:
+# confirms decay how often it asks (floor below) and nudge the wake gate;
+# denials stop the wrong outcome, invite a restated command (which becomes a
+# correction fact in memory), and re-arm asking. Wake clips are kept under
+# /var/lib/hermit/feedback/clips as labeled retraining data.
+enabled = true
+settle_secs = 20          # let the answer/music play this long before asking
+listen_ms = 6000          # yes/no window; a denial's restatement gets >= 8s
+ask_probability = 1.0     # starting ask rate; decays toward the floor
+min_ask_probability = 0.15
+max_clips = 400           # newest wake clips kept on disk
 
 [audio]
 playback_pcm = "hermit_out"   # defined in /etc/asound.conf

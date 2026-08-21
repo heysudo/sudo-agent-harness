@@ -821,6 +821,16 @@ configure_alsa() {
     log "asound.conf card reference '${conf_card}' matches a present card"
 
     configure_mixer "$conf_card"
+
+    # XVF3800 control plane: the on-chip AGC target ships far too quiet for
+    # wake/STT models (the "device cannot hear" bug class). tools/xvf3800/
+    # installs a USB control tool, a udev rule, and the level tuning, and
+    # persists it to chip flash. Safe to re-run; skipped if the tree is absent.
+    if [[ -f "${DEPLOY_DIR}/../tools/xvf3800/setup.sh" ]]; then
+        log "applying XVF3800 control-plane setup (AGC level tuning)"
+        bash "${DEPLOY_DIR}/../tools/xvf3800/setup.sh" || \
+            warn "xvf3800 setup failed; mic will be quiet - set wake.gain and stt.sarvam_gain to 8.0"
+    fi
 }
 
 # ---------------------------------------------------------------------------
