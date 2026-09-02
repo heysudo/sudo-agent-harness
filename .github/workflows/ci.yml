@@ -35,11 +35,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends libasound2-dev \
             || (sleep 5 && sudo apt-get install -y --no-install-recommends libasound2-dev)
 
-      - name: Rust toolchain (pinned by hermit/rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97"
-          components: rustfmt, clippy
+      # The single source of truth for the compiler version is
+      # hermit/rust-toolchain.toml; rustup reads it (channel + components)
+      # when invoked from that directory, so nothing is duplicated here.
+      - name: Rust toolchain (from hermit/rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
         with:

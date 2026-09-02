@@ -1,6 +1,6 @@
 # Pin the toolchain: the codebase uses edition-2024 features (let-chains) and
-# panic=abort release semantics that deserve a known-good compiler. Keep in
-# sync with the version CI uses (.github/workflows/ci.yml).
+# panic=abort release semantics that deserve a known-good compiler. CI
+# (.github/workflows/ci.yml) installs whatever this file says; edit only here.
 [toolchain]
 channel = "1.97"
 components = ["rustfmt", "clippy"]

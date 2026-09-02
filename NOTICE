@@ -1,0 +1,22 @@
+HERMIT / Sudo agent harness
+Copyright (c) 2026 Sudo Automations
+Licensed under the MIT License (see LICENSE).
+
+This repository includes material derived from third-party projects:
+
+  hermit/tools/xvf3800/xvf.py
+    Adapted from pollen-robotics/reachy_mini (audio_control_utils.py),
+    Copyright Pollen Robotics, licensed under the Apache License, Version 2.0
+    (https://www.apache.org/licenses/LICENSE-2.0). Modifications: Seeed
+    reSpeaker Flex USB IDs, the DOA_VALUE register, and a reduced parameter map.
+
+  hermit/models/melspectrogram.onnx, hermit/models/embedding_model.onnx
+    Unmodified feature-extractor graphs from openWakeWord
+    (https://github.com/dscripka/openWakeWord), Copyright David Scripka,
+    licensed under the Apache License, Version 2.0, as redistributed by
+    livekit-wakeword. hermit/models/hey_sudo.onnx is this project's own model.
+
+  reSpeaker Flex XVF3800 USB firmware
+    Not included. hermit/firmware/fetch.sh downloads it from Seeed's repository
+    (https://github.com/respeaker/reSpeaker_Flex); it remains subject to
+    Seeed's terms.

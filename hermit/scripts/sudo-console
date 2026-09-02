@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# sudo-console — attach the live TUI to a HERMIT device from the dev machine.
+# sudo-console — attach the live TUI to the HERMIT device from the dev machine.
+# (On the Pi itself, run:  python3 ~/hermit-deploy/tools/sudo-console.py)
+#
+# Usage:  scripts/sudo-console <ssh-host>
 set -euo pipefail
-HOST="${1:-<pi-host>}"
-TERM_NAME="${TERM:-xterm-256color}"
-[[ "$TERM_NAME" == "dumb" || "$TERM_NAME" == "unknown" ]] && TERM_NAME="xterm-256color"
-exec ssh -t "$HOST" "TERM=$(printf '%q' "$TERM_NAME") exec sudo-console"
+HOST="${1:?usage: scripts/sudo-console <ssh-host>   (an alias from ~/.ssh/config)}"
+# HERMIT_STATE_DIR: /run/hermit under systemd; test sessions use /tmp/hermit-state.
+exec ssh -t "$HOST" "HERMIT_STATE_DIR=\${HERMIT_STATE_DIR:-/tmp/hermit-state} python3 ~/hermit-deploy/tools/sudo-console.py"

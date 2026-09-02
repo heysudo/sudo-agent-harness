@@ -1,4 +1,4 @@
-//! Pipeline → console decoupling, borrowed from the b2-34 `sudo-console` design.
+//! Pipeline → console decoupling.
 //!
 //! The daemon writes small JSON files to tmpfs; the operator TUI (`tools/sudo-console`)
 //! tails them. The interface is one-way by construction — the daemon never depends on

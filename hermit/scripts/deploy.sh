@@ -46,7 +46,10 @@ ssh "$HOST" 'mkdir -p ~/hermit-deploy/bin ~/respeaker-fw'
 $RSYNC "$BIN"            "$HOST:~/hermit-deploy/bin/hermit"
 $RSYNC deploy/ scripts/  "$HOST:~/hermit-deploy/deploy/"
 $RSYNC config/           "$HOST:~/hermit-deploy/config/"
-$RSYNC firmware/         "$HOST:~/respeaker-fw/"
+# Firmware is not in the repo (see firmware/fetch.sh); ship it only if fetched.
+if ls firmware/*.bin >/dev/null 2>&1; then
+  $RSYNC firmware/       "$HOST:~/respeaker-fw/"
+fi
 $RSYNC models/           "$HOST:~/hermit-deploy/models/"
 $RSYNC tools/            "$HOST:~/hermit-deploy/tools/"
 $RSYNC assets/           "$HOST:~/hermit-deploy/assets/"

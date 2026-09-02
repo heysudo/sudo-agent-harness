@@ -96,7 +96,9 @@ Source repo:  https://github.com/respeaker/reSpeaker_Flex  (xmos_firmwares/usb/)
 Direct link:  https://raw.githubusercontent.com/respeaker/reSpeaker_Flex/main/xmos_firmwares/usb/respeaker_flex_usb_l16k2ch_v1.0.3.bin
 Size:         929792 bytes
 SHA-256:      d54ffec32f523e2b0bea64fb2fc35c590e58397e6990bea043682b94252599f1
-A verified copy is checked into this repo at hermit/firmware/ alongside SHA256SUMS.
+Not redistributed here (Seeed publishes it without a licence). Run
+hermit/firmware/fetch.sh: it downloads the file above and verifies it against the
+pinned checksum in hermit/firmware/SHA256SUMS.
 
 WHY 16 kHz AND NOT 48 kHz: the XVF3800's entire DSP pipeline (AEC, beamforming, NS)
 runs at 16 kHz internally. The 48k firmware just resamples at the USB edge. Since we

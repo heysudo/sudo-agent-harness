@@ -1,7 +1,7 @@
 //! "Hey Sudo" wake word — the project's own trained model.
 //!
-//! This is the wake engine the wider `heysudo/sudo` project already trained and
-//! ships as `sudoedge/models/hey_sudo.onnx`. It is a **livekit-wakeword** /
+//! This is the wake engine the project trained in-house and ships as
+//! `models/hey_sudo.onnx`. It is a **livekit-wakeword** /
 //! openWakeWord-style classifier, NOT Porcupine, so it needs its own runtime. This
 //! module is a faithful port of that Python inference path (`livekit.wakeword`'s
 //! `WakeWordModel.predict`) so the Rust daemon scores bit-for-bit like the reference.

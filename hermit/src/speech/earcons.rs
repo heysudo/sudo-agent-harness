@@ -1,4 +1,4 @@
-//! Earcons — the short UI sounds, borrowed from the b2-34 project.
+//! Earcons — the short UI sounds.
 //!
 //! Three are wired (Alexa-style lifecycle cues):
 //! - `trigger_ack` plays the instant the wake word fires: "heard you".

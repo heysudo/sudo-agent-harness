@@ -117,7 +117,7 @@ pub async fn run(
     let console_volume = Arc::new(AtomicU16::new(u16::MAX));
     // Console telemetry + control (sudo-console). All throttled internally.
     let state = Arc::new(Mutex::new(crate::state_io::StateWriter::new()));
-    // UI sounds (b2-34 earcons): instant wake ack + end-of-speech "working on it".
+    // UI sounds (earcons): instant wake ack + end-of-speech "working on it".
     let earcons = Arc::new(Earcons::load());
 
     tracing::info!("voice pipeline ready; waiting for the wake word");

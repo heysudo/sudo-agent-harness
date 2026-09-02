@@ -19,3 +19,11 @@
 # Local Hermes workspace (plans, scratch) — never commit
 .hermes/
 WAKE-WORD-IMPROVEMENT-PLAN.md
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Vendor firmware: fetched by hermit/firmware/fetch.sh, never committed
+/hermit/firmware/*.bin
+/hermit/firmware/*.part

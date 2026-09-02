@@ -200,8 +200,9 @@ tone playing through the speaker:
 ~22 dB relative suppression — the echo is cancelled, and ch0 is the correct channel for
 the daemon.
 
-The board already shipped USB firmware, so no flash was needed; a verified image is
-kept in `firmware/` regardless. Its DFU id is `2886:801c` (the wiki says `001a`, which
+The board already shipped USB firmware, so no flash was needed. The image is not
+redistributed in this repo; `firmware/fetch.sh` downloads it from Seeed's repository
+and verifies it against the pinned checksum. Its DFU id is `2886:801c` (the wiki says `001a`, which
 is the *normal* mode id here).
 
 Two more field notes that cost real time:
